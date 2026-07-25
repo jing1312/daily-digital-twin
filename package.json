@@ -1,0 +1,14 @@
+{
+  "name": "daily-digital-twin",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "node --test",
+    "audit:privacy": "node scripts/privacy-audit.mjs",
+    "runtime": "node src/runtime.mjs"
+  }
+}

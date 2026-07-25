@@ -1,0 +1,15 @@
+{
+  "privateHome": "%DAILY_TWIN_HOME%",
+  "database": "data\\runtime.sqlite",
+  "maxSlots": 4,
+  "resource": {
+    "cpuLimitPercent": 55,
+    "minAvailableMemoryGb": 8,
+    "minDiskFreeGb": 20,
+    "batterySlotLimit": 1
+  },
+  "retries": {
+    "maxAttempts": 3,
+    "backoffSeconds": [30, 120, 300]
+  }
+}

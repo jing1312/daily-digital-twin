@@ -1,0 +1,29 @@
+{
+  "apps": [
+    {
+      "id": "vscode",
+      "aliases": ["VS Code", "Visual Studio Code"],
+      "path": "C:\\Path\\To\\Code.exe",
+      "processName": "Code",
+      "windowTitlePattern": "Visual Studio Code",
+      "resource": "app:vscode"
+    },
+    {
+      "id": "omicos",
+      "aliases": ["Omicos"],
+      "path": "C:\\Path\\To\\Omicos.exe",
+      "processName": "Omicos",
+      "windowTitlePattern": "Omicos",
+      "resource": "app:omicos"
+    }
+  ],
+  "websites": [
+    {
+      "id": "biomni",
+      "aliases": ["Biomni"],
+      "url": "https://example.invalid/biomni",
+      "browser": "edge",
+      "resource": "web:biomni"
+    }
+  ]
+}
