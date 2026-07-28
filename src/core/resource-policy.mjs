@@ -1,6 +1,35 @@
 // 中文注释：基于电源和实时资源决定新动作是否可以启动。
-export function decideResourcePolicy({ onAcPower, cpuPercent, availableMemoryGb, diskFreeGb }) {
-  if (cpuPercent >= 55 || availableMemoryGb < 8 || diskFreeGb < 20) return { slotLimit: 0, acceptsNewActions: false, reason: '资源不足' };
-  if (!onAcPower) return { slotLimit: 1, acceptsNewActions: true, reason: '电池模式' };
-  return { slotLimit: 4, acceptsNewActions: true, reason: null };
+// 中文注释：遥测缺失时必须失败关闭 —— 与 undefined 比较恒为 false，旧实现等于所有闸门全开（修 B6）。
+
+export const DEFAULT_RESOURCE_LIMITS = {
+  cpuLimitPercent: 55,
+  minAvailableMemoryGb: 8,
+  minDiskFreeGb: 20,
+  batterySlotLimit: 1,
+  maxSlots: 4
+};
+
+const REQUIRED_NUMERIC_FIELDS = ['cpuPercent', 'availableMemoryGb', 'diskFreeGb'];
+
+export function decideResourcePolicy(telemetry = {}, limits = DEFAULT_RESOURCE_LIMITS) {
+  const reading = telemetry ?? {};
+  const missing = REQUIRED_NUMERIC_FIELDS.filter((field) => !Number.isFinite(reading[field]));
+  if (typeof reading.onAcPower !== 'boolean') missing.push('onAcPower');
+  if (missing.length > 0) {
+    return { slotLimit: 0, acceptsNewActions: false, reason: '遥测缺失', missing };
+  }
+
+  const effective = { ...DEFAULT_RESOURCE_LIMITS, ...(limits ?? {}) };
+  if (
+    reading.cpuPercent >= effective.cpuLimitPercent ||
+    reading.availableMemoryGb < effective.minAvailableMemoryGb ||
+    reading.diskFreeGb < effective.minDiskFreeGb
+  ) {
+    return { slotLimit: 0, acceptsNewActions: false, reason: '资源不足' };
+  }
+
+  if (!reading.onAcPower) {
+    return { slotLimit: effective.batterySlotLimit, acceptsNewActions: true, reason: '电池模式' };
+  }
+  return { slotLimit: effective.maxSlots, acceptsNewActions: true, reason: null };
 }
