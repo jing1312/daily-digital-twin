@@ -366,6 +366,22 @@ try {
     Write-DailyTwinCheck -Name '重复执行报 already_ok（幂等）' -Condition ($null -ne $again -and $again.status -eq 'already_ok') -Detail "得到：$($again.status)"
     Write-DailyTwinCheck -Name '幂等执行不再生成新备份' -Condition (@(Get-ChildItem -LiteralPath $ocDir -Filter '*.bak').Count -eq 1)
 
+    # 中文注释：旧版脚本曾经写入无效的顶层 browser.userDataDir。新版不能只是不再新增，
+    # 中文注释：还必须把自己留下的污染列成迁移项；否则会带着坏键返回 already_ok。
+    $legacyUserDataPath = Join-Path $ocDir 'with-legacy-user-data-dir.json'
+    $legacyUserDataText = '{"tools":{"alsoAllow":["browser"]},"browser":{"defaultProfile":"openclaw","snapshotDefaults":{"mode":"efficient"},"userDataDir":"D:\\obsolete-browser-profile"}}'
+    [System.IO.File]::WriteAllText($legacyUserDataPath, $legacyUserDataText, $utf8NoBom)
+    $legacyPreview = Invoke-DailyTwinProfileScript -Path $legacyUserDataPath
+    Write-DailyTwinCheck -Name '旧版顶层 browser.userDataDir 被列为迁移项' `
+        -Condition ($null -ne $legacyPreview -and $legacyPreview.status -eq 'preview' -and @($legacyPreview.changes | ForEach-Object { $_.path }) -contains 'browser.userDataDir') `
+        -Detail "status=$($legacyPreview.status); changes=$(@($legacyPreview.changes | ForEach-Object { $_.path }) -join ',')"
+    $legacyApplied = Invoke-DailyTwinProfileScript -Path $legacyUserDataPath -ApplyChanges
+    $legacyAfter = ConvertFrom-DailyTwinJson -Path $legacyUserDataPath
+    $legacyBrowserKeys = @($legacyAfter.browser.PSObject.Properties | ForEach-Object { $_.Name })
+    Write-DailyTwinCheck -Name '应用迁移后删除旧版顶层 browser.userDataDir' `
+        -Condition ($null -ne $legacyApplied -and $legacyApplied.status -eq 'applied' -and $legacyBrowserKeys -notcontains 'userDataDir') `
+        -Detail "status=$($legacyApplied.status); keys=$($legacyBrowserKeys -join ',')"
+
     # 中文注释：闸门一 —— allow 是替换语义，alsoAllow 是追加语义，同一作用域不能共存，只能由人决定。
     $allowPath = Join-Path $ocDir 'with-allow.json'
     [System.IO.File]::WriteAllText($allowPath, '{"tools":{"profile":"coding","allow":["fs","exec"]}}', $utf8NoBom)
@@ -434,13 +450,31 @@ try {
         & /usr/bin/chmod '755' $stubPath
     }
 
+    function Get-DailyTwinActionStubArgv {
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory = $true)][string]$Action,
+            [string]$Mode = 'efficient',
+            [string]$Url,
+            [string]$TargetId,
+            [int]$Ref = -1,
+            [string]$Text
+        )
+        Remove-Item -LiteralPath $argvPath -Force -ErrorAction SilentlyContinue
+        $parameters = @{ Action = $Action; SnapshotMode = $Mode; OpenClawPath = $stubPath }
+        if (-not [string]::IsNullOrWhiteSpace($Url)) { $parameters['Url'] = $Url }
+        if (-not [string]::IsNullOrWhiteSpace($TargetId)) { $parameters['TargetId'] = $TargetId }
+        if ($Ref -ge 0) { $parameters['Ref'] = $Ref }
+        if ($null -ne $Text) { $parameters['Text'] = $Text }
+        & $browserScript @parameters | Out-Null
+        if (-not (Test-Path -LiteralPath $argvPath)) { return $null }
+        return ((Get-Content -LiteralPath $argvPath -Raw) -replace '\s+', ' ').Trim()
+    }
+
     function Get-DailyTwinStubArgv {
         [CmdletBinding()]
         param([Parameter(Mandatory = $true)][string]$Mode)
-        Remove-Item -LiteralPath $argvPath -Force -ErrorAction SilentlyContinue
-        & $browserScript -Action snapshot -SnapshotMode $Mode -OpenClawPath $stubPath | Out-Null
-        if (-not (Test-Path -LiteralPath $argvPath)) { return $null }
-        return ((Get-Content -LiteralPath $argvPath -Raw) -replace '\s+', ' ').Trim()
+        return (Get-DailyTwinActionStubArgv -Action 'snapshot' -Mode $Mode)
     }
 
     $stubSanity = Get-DailyTwinStubArgv -Mode 'efficient'
@@ -469,6 +503,29 @@ try {
     $threw = $false
     try { & $browserScript -Action snapshot -SnapshotMode 'nonsense' -OpenClawPath $stubPath | Out-Null } catch { $threw = $true }
     Write-DailyTwinCheck -Name '未知 SnapshotMode 被 ValidateSet 拒绝' -Condition $threw
+
+    # 中文注释：目标标签是任务隔离的边界。type 必须显式传 --target-id，不能写进当前碰巧激活的页面；
+    # 中文注释：screenshot 的 OpenClaw 契约则是位置参数 screenshot <targetId>，不是 --target-id。
+    $taskTargetId = 'task-tab-123'
+    $openArgv = Get-DailyTwinActionStubArgv -Action 'open' -Url 'https://example.invalid/task'
+    Write-DailyTwinCheck -Name 'open 把 URL 作为位置参数传给 OpenClaw' `
+        -Condition ($openArgv -like '*open https://example.invalid/task*') -Detail "argv=$openArgv"
+
+    $snapshotTargetArgv = Get-DailyTwinActionStubArgv -Action 'snapshot' -Mode 'efficient' -TargetId $taskTargetId
+    Write-DailyTwinCheck -Name 'snapshot 把目标标签作为 --target-id 传给 OpenClaw' `
+        -Condition ($snapshotTargetArgv -like "*snapshot --efficient --target-id $taskTargetId*") -Detail "argv=$snapshotTargetArgv"
+
+    $typeArgv = Get-DailyTwinActionStubArgv -Action 'type' -TargetId $taskTargetId -Ref 42 -Text 'TEST_TEXT'
+    Write-DailyTwinCheck -Name 'type 把目标标签作为 --target-id 传给 OpenClaw' `
+        -Condition ($typeArgv -like "*type 42 TEST_TEXT --target-id $taskTargetId*") -Detail "argv=$typeArgv"
+
+    $screenshotArgv = Get-DailyTwinActionStubArgv -Action 'screenshot' -TargetId $taskTargetId
+    Write-DailyTwinCheck -Name 'screenshot 把目标标签作为位置参数传给 OpenClaw' `
+        -Condition ($screenshotArgv -like "*screenshot $taskTargetId*" -and $screenshotArgv -notlike '*--target-id*') -Detail "argv=$screenshotArgv"
+
+    $statusArgv = Get-DailyTwinActionStubArgv -Action 'status'
+    Write-DailyTwinCheck -Name 'status 不夹带其他动作参数' `
+        -Condition ($statusArgv -like '*--json status' -and $statusArgv -notlike '*--target-id*') -Detail "argv=$statusArgv"
 } finally {
     $env:DAILY_TWIN_HOME = $originalHome
     Remove-Item -LiteralPath $workRoot -Recurse -Force -ErrorAction SilentlyContinue

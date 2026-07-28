@@ -139,6 +139,13 @@ if ($currentSnapshot -ne $SnapshotMode) {
 # 中文注释：existing-session 驱动用的（让它去附着一个非默认的 Chromium 用户目录）；
 # 中文注释：受管浏览器"仍然使用它自己的用户数据目录"，位置是固定的，配置改不了。
 # 中文注释：写一个不被读取的键，等于在回执里承诺一件不会发生的事，所以整段删掉。
+# 中文注释：如果旧版脚本已经写入这个键，新版必须迁移掉，不能带着已知污染返回 already_ok。
+$legacyUserDataProperty = $browser.PSObject.Properties['userDataDir']
+if ($null -ne $legacyUserDataProperty) {
+    $browser.PSObject.Properties.Remove('userDataDir')
+    Add-DailyTwinChange -Path 'browser.userDataDir' -From '(已设置，值不回显)' -To '(删除)' `
+        -Why 'OpenClaw 不读取这个顶层键；清理旧版脚本留下的无效配置'
+}
 #
 # 中文注释：改成如实报告登录态真正落在哪儿 —— 这是备份策略和磁盘策略真正要盯的路径。
 $managedUserDataDir = $null
@@ -201,6 +208,7 @@ if ($Apply -and $changes.Count -gt 0) {
             $verifyAlsoAllow = @(Get-DailyTwinProperty -InputObject $verifyTools -Name 'alsoAllow' -Default @())
             $verifyBrowser = Get-DailyTwinProperty -InputObject $verify -Name 'browser'
             $verifyProfile = Get-DailyTwinProperty -InputObject $verifyBrowser -Name 'defaultProfile'
+            $verifyLegacyUserDataProperty = $verifyBrowser.PSObject.Properties['userDataDir']
             $rawWritten = [System.IO.File]::ReadAllText($ConfigPath, (New-Object System.Text.UTF8Encoding($false)))
 
             if ($lostKeys.Count -gt 0) {
@@ -211,6 +219,8 @@ if ($Apply -and $changes.Count -gt 0) {
                 $verifyFailure = 'tools.alsoAllow 里没有 browser'
             } elseif ($verifyProfile -ne 'openclaw') {
                 $verifyFailure = "browser.defaultProfile 不是 openclaw（实际是 $verifyProfile）"
+            } elseif ($null -ne $legacyUserDataProperty -and $null -ne $verifyLegacyUserDataProperty) {
+                $verifyFailure = '旧版顶层 browser.userDataDir 没有被删除'
             }
         }
 

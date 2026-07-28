@@ -90,10 +90,12 @@ switch ($Action) {
         if ($Ref -lt 0) { throw 'type 需要 -Ref（页面元素编号）' }
         if ([string]::IsNullOrEmpty($Text)) { throw 'type 需要 -Text' }
         $browserArguments = @('type', "$Ref", $Text)
+        if (-not [string]::IsNullOrWhiteSpace($TargetId)) { $browserArguments += @('--target-id', $TargetId) }
     }
     'screenshot' {
         $browserArguments = @('screenshot')
-        if (-not [string]::IsNullOrWhiteSpace($TargetId)) { $browserArguments += @('--target-id', $TargetId) }
+        # 中文注释：screenshot 的 targetId 是位置参数；它和 snapshot/type 的 --target-id 契约不同。
+        if (-not [string]::IsNullOrWhiteSpace($TargetId)) { $browserArguments += $TargetId }
     }
     'status' {
         $browserArguments = @('status')
