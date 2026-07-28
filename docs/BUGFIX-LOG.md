@@ -368,6 +368,66 @@ Tab／换行更是在任意位置都会被移除。**它举的例子本来就是
 
 ---
 
+## B28 `Resolve-DailyTwinPwsh` 会接受一个带完整路径的非 PowerShell 程序
+
+**来源：** 她在真机上实测发现 —— 传入 `C:\Windows\System32\cmd.exe`，函数把它原样返回了。
+
+守卫原本是三个条件与在一起：
+
+```powershell
+if (-not [string]::IsNullOrWhiteSpace($Preferred) -and
+    [System.IO.Path]::GetFileName($Preferred) -notin @('pwsh', 'pwsh.exe') -and
+    -not [System.IO.Path]::IsPathRooted($Preferred)) {   # <- 这一行是洞
+    return $null
+}
+```
+
+第三个条件的意思变成了「只要给的是完整路径，就不检查名字了」。于是任何一个带盘符的
+可执行文件都能冒充 pwsh 被返回出去，而这个返回值最终是要被写进计划任务、开机自动跑的。
+
+**顺带发现的另一半（同一类错误，比上面那条更糟）：** 名字对、但位置不存在时，函数会
+**改用兜底目录里的另一份 pwsh**：
+
+| 传入 | 修复前返回 | 修复后 |
+|---|---|---|
+| `/bin/true`（完整路径，非 pwsh，文件真实存在） | **`/bin/true`** | `$null` |
+| `C:\Windows\System32\cmd.exe` | **原样返回** | `$null` |
+| `<workRoot>\Custom\pwsh.exe`（不存在） | **`<ProgramFiles>\PowerShell\7\pwsh.exe`** | `$null` |
+| `some/where/pwsh.exe`（不存在） | **`<ProgramFiles>\PowerShell\7\pwsh.exe`** | `$null` |
+| `<真实存在的>\pwsh.exe` | 原样返回 | 原样返回（不变） |
+
+函数自己的注释从第一天起就写着「**不得猜测成另一份 pwsh**」，但代码没做到。
+调用方点名了一个具体位置，拿到的却是别的位置上的另一个文件 —— 这就是 VS Code 幻觉事件的形态。
+
+**改法：** 把输入明确分成两类，两条路不互相兜底。
+
+- 裸名 `pwsh` / `pwsh.exe` —— 等于「没有偏好」，可以查 PATH、可以走兜底目录；
+- 带目录的路径 —— 等于「我就要这一个」，只在该位置找，找不到返回 `$null`；
+- 其余一切 —— `$null`，带不带完整路径都一样。
+
+**负向对照，以及一个必须说清楚的陷阱：**
+
+直接拿 `'C:\Windows\System32\cmd.exe'` 当断言，**在 Linux 上是假通过**：Unix 下 `\` 不是
+路径分隔符，`GetFileName` 会把整串原样吐回来，于是它落进「名字不对」的分支返回 `$null` ——
+过是过了，走的却根本不是出问题的那条路。实测修复前的代码在沙箱里跑这条断言同样是 `ok`。
+
+所以这一组断言里同时放了两种写法：她真机上的原始写法（只有 Windows CI 上才有判定力），
+以及本系统原生的完整路径（`$onWindows` 分支，任何系统上都真的走到出问题的分支）。
+用修复前的 `DailyTwin.Common.ps1` 跑，在沙箱里挂 3 条：
+
+```
+FAIL 完整路径的非 pwsh 程序必须返回 null（本系统原生写法）  传入：/bin/true
+FAIL 点名一个不存在的完整路径 pwsh，不许改用兜底目录里那份
+FAIL 点名一个不存在的相对路径 pwsh，同样不许换
+```
+
+「不许换成另一份 pwsh」那两条必须在**兜底目标真实存在**的前提下测（测试里临时把
+`$env:ProgramFiles` 指向一个造出来的诱饵目录），否则又是一次假通过。
+
+**触发面：** 三个生产调用点当时都不传参，所以路线 C 不会踩到。这是提前堵，不是救火。
+
+---
+
 ## 偏离原计划的地方（7 条，全部有意为之）
 
 | # | 偏离 | 原因 |

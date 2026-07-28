@@ -175,6 +175,45 @@ try {
     } finally {
         $env:ProgramFiles = $savedProgramFiles
     }
+    # 中文注释：B28 —— 完整路径漏口。真机实测：传 C:\Windows\System32\cmd.exe，函数把它原样返回了。
+    # 中文注释：注意一个坑：直接拿 'C:\Windows\System32\cmd.exe' 当断言，在 Linux 上是假通过 ——
+    # 中文注释：Unix 下 \ 不是路径分隔符，GetFileName 会把整串原样吐回来，于是走的根本不是同一条分支。
+    # 中文注释：所以下面既留了她真机上的原始写法（在 Windows CI 上才有意义），
+    # 中文注释：也用本系统原生的完整路径再测一遍，保证这条语义在任何系统上都真的被验证。
+    $realForeignExe = if ($onWindows) { "$env:SystemRoot\System32\cmd.exe" } else { '/bin/true' }
+    Write-DailyTwinCheck -Name '完整路径的非 pwsh 程序必须返回 null（本系统原生写法）' -Condition ($null -eq (Resolve-DailyTwinPwsh -Preferred $realForeignExe)) -Detail "传入：$realForeignExe"
+    Write-DailyTwinCheck -Name '完整路径的 cmd.exe 必须返回 null（真机复现的原始写法）' -Condition ($null -eq (Resolve-DailyTwinPwsh -Preferred 'C:\Windows\System32\cmd.exe'))
+    Write-DailyTwinCheck -Name '相对路径的非 pwsh 程序也必须返回 null' -Condition ($null -eq (Resolve-DailyTwinPwsh -Preferred 'tools/cmd.exe'))
+
+    # 中文注释：同一类错误的另一半 —— 名字对但位置不存在时，不许换成兜底目录里的另一份 pwsh。
+    # 中文注释：这一条必须在「兜底目标真实存在」的前提下测，否则又是假通过。
+    $savedProgramFiles2 = $env:ProgramFiles
+    try {
+        $decoyRoot = Join-Path $workRoot 'decoy-program-files'
+        $decoyPwsh = Join-Path $decoyRoot 'PowerShell\7\pwsh.exe'
+        $null = New-Item -ItemType File -Force -Path $decoyPwsh
+        $env:ProgramFiles = $decoyRoot
+
+        $missingRooted = Join-Path $workRoot 'Custom/pwsh.exe'
+        Write-DailyTwinCheck -Name '点名一个不存在的完整路径 pwsh，不许改用兜底目录里那份' -Condition ($null -eq (Resolve-DailyTwinPwsh -Preferred $missingRooted)) -Detail "诱饵：$decoyPwsh"
+        Write-DailyTwinCheck -Name '点名一个不存在的相对路径 pwsh，同样不许换' -Condition ($null -eq (Resolve-DailyTwinPwsh -Preferred 'some/where/pwsh.exe')) -Detail "诱饵：$decoyPwsh"
+
+        # 中文注释：反过来也要守住 —— 完整路径指向的 pwsh 确实存在时，必须原样返回，不能连好的一起毙掉。
+        $realRootedDir = Join-Path $workRoot 'real-pwsh'
+        $null = New-Item -ItemType Directory -Force -Path $realRootedDir
+        $realRooted = Join-Path $realRootedDir 'pwsh.exe'
+        if ($onWindows) {
+            $null = New-Item -ItemType File -Force -Path $realRooted
+        } else {
+            Copy-Item -LiteralPath '/bin/true' -Destination $realRooted -Force
+            & /usr/bin/chmod '755' $realRooted
+        }
+        $resolvedRooted = Resolve-DailyTwinPwsh -Preferred $realRooted
+        Write-DailyTwinCheck -Name '完整路径指向的 pwsh 真实存在时原样返回' -Condition ($resolvedRooted -eq $realRooted) -Detail "得到：$resolvedRooted"
+    } finally {
+        $env:ProgramFiles = $savedProgramFiles2
+    }
+
     $foundPwsh = Resolve-DailyTwinPwsh -Preferred 'pwsh'
     if ($null -ne $foundPwsh) {
         Write-DailyTwinCheck -Name '能在 PATH 上找到 pwsh' -Condition ($true) -Detail $foundPwsh

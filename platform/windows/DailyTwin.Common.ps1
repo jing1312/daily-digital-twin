@@ -181,11 +181,23 @@ function Resolve-DailyTwinPwsh {
     [CmdletBinding()]
     param([string]$Preferred = 'pwsh.exe')
 
-    # 中文注释：调用方若明确指定了非标准名称，找不到时必须失败，不得猜测成另一份 pwsh。
-    if (-not [string]::IsNullOrWhiteSpace($Preferred) -and
-        [System.IO.Path]::GetFileName($Preferred) -notin @('pwsh', 'pwsh.exe') -and
-        -not [System.IO.Path]::IsPathRooted($Preferred)) {
-        return $null
+    # 中文注释：这个函数只认两种输入，分开处理，两条路绝不互相兜底：
+    # 中文注释：  1) 裸名 pwsh / pwsh.exe —— 等于「没有偏好」，可以查 PATH、可以走下面的兜底目录；
+    # 中文注释：  2) 带目录的路径 —— 等于「我就要这一个」，只在这个位置找，找不到就返回 $null，
+    # 中文注释：     绝不退回去猜另一份 pwsh。函数注释从一开始就是这么承诺的，之前没做到。
+    # 中文注释：其余一切（cmd.exe、notepad.exe……）一律 $null，带不带完整路径都一样 ——
+    # 中文注释：曾经这里还有一个 -not IsPathRooted 条件，导致 C:\Windows\System32\cmd.exe 被原样放行。
+    if (-not [string]::IsNullOrWhiteSpace($Preferred)) {
+        $leaf = [System.IO.Path]::GetFileName($Preferred)
+        if ($leaf -notin @('pwsh', 'pwsh.exe')) { return $null }
+
+        # 中文注释：叶子名和原串不相等，说明前面还挂着目录，属于第 2 种输入。
+        if ($leaf -ne $Preferred) {
+            $explicit = Get-Command -Name $Preferred -CommandType Application -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+            if ($explicit) { return $explicit.Source }
+            return $null
+        }
     }
 
     $command = Get-Command -Name $Preferred -CommandType Application -ErrorAction SilentlyContinue |
