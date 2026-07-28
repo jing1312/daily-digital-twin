@@ -210,6 +210,24 @@ try {
         }
         $resolvedRooted = Resolve-DailyTwinPwsh -Preferred $realRooted
         Write-DailyTwinCheck -Name '完整路径指向的 pwsh 真实存在时原样返回' -Condition ($resolvedRooted -eq $realRooted) -Detail "得到：$resolvedRooted"
+
+        # 中文注释：B28b —— 三个边界，全都会在「兜底目标真实存在」时悄悄换掉程序。
+        # 中文注释：空白那条尤其隐蔽：调用方传了个空字符串进来，拿到的却是系统里的 PowerShell 7。
+        Write-DailyTwinCheck -Name '空串返回 null 而不是抛参数错误' -Condition ($null -eq (Resolve-DailyTwinPwsh -Preferred ''))
+        Write-DailyTwinCheck -Name '纯空白返回 null，不许落进兜底搜索' -Condition ($null -eq (Resolve-DailyTwinPwsh -Preferred ' ')) -Detail "诱饵：$decoyPwsh"
+
+        # 中文注释：通配符必须拒绝。造一个真的能被通配符命中的 pwsh，否则这条又是假通过。
+        $wildDir = Join-Path $workRoot 'wild/PowerShell/7'
+        $null = New-Item -ItemType Directory -Force -Path $wildDir
+        $wildTarget = Join-Path $wildDir 'pwsh.exe'
+        if ($onWindows) {
+            $null = New-Item -ItemType File -Force -Path $wildTarget
+        } else {
+            Copy-Item -LiteralPath '/bin/true' -Destination $wildTarget -Force
+            & /usr/bin/chmod '755' $wildTarget
+        }
+        $wildPattern = Join-Path $workRoot 'wild/PowerShell/*/pwsh.exe'
+        Write-DailyTwinCheck -Name '通配符路径一律拒绝，不许替调用方挑一个' -Condition ($null -eq (Resolve-DailyTwinPwsh -Preferred $wildPattern)) -Detail "能命中：$wildTarget"
     } finally {
         $env:ProgramFiles = $savedProgramFiles2
     }
@@ -277,12 +295,12 @@ try {
             [Parameter(Mandatory = $true)][string]$Path,
             [switch]$ApplyChanges,
             [switch]$DryRun,
-            [string]$DataDir
+            [string]$SnapshotMode
         )
         $parameters = @{ ConfigPath = $Path; WarningAction = 'SilentlyContinue' }
         if ($ApplyChanges) { $parameters['Apply'] = $true }
         if ($DryRun) { $parameters['WhatIf'] = $true }
-        if (-not [string]::IsNullOrWhiteSpace($DataDir)) { $parameters['ManagedUserDataDir'] = $DataDir }
+        if (-not [string]::IsNullOrWhiteSpace($SnapshotMode)) { $parameters['SnapshotMode'] = $SnapshotMode }
         $captured = @(& $script:openClawScript @parameters)
         $line = @($captured | Where-Object { $_ -is [string] -and $_.StartsWith('{') }) | Select-Object -Last 1
         if ($null -eq $line) { return $null }
@@ -308,14 +326,14 @@ try {
     # 中文注释：-Apply -WhatIf 是最容易说谎的一条路 —— 加了 -Apply，但 ShouldProcess 把写盘拦了下来。
     # 中文注释：回执如果还报 applied、还给一个 rollbackCommand，那就是在报告一件没发生过的事，
     # 中文注释：跟当初那个「VS Code 明明没装却说打开了」是同一类错误，必须钉死。
-    $dryRun = Invoke-DailyTwinProfileScript -Path $ocPath -ApplyChanges -DryRun -DataDir 'D:\DailyTwin\browser-profile'
+    $dryRun = Invoke-DailyTwinProfileScript -Path $ocPath -ApplyChanges -DryRun
     Write-DailyTwinCheck -Name '-Apply -WhatIf 如实报 preview 而不是 applied' -Condition ($null -ne $dryRun -and $dryRun.status -eq 'preview') -Detail "得到：$($dryRun.status)"
     Write-DailyTwinCheck -Name '-Apply -WhatIf 不给 backupPath' -Condition ($null -ne $dryRun -and $null -eq $dryRun.backupPath) -Detail "得到：$($dryRun.backupPath)"
     Write-DailyTwinCheck -Name '-Apply -WhatIf 不给 rollbackCommand' -Condition ($null -ne $dryRun -and $null -eq $dryRun.rollbackCommand)
     Write-DailyTwinCheck -Name '-Apply -WhatIf 确实没生成备份文件' -Condition (@(Get-ChildItem -LiteralPath $ocDir -Filter '*.bak').Count -eq 0)
     Write-DailyTwinCheck -Name '-Apply -WhatIf 一个字节都没改' -Condition (([System.IO.File]::ReadAllText($ocPath, $utf8NoBom)) -eq $originalText)
 
-    $applied = Invoke-DailyTwinProfileScript -Path $ocPath -ApplyChanges -DataDir 'D:\DailyTwin\browser-profile'
+    $applied = Invoke-DailyTwinProfileScript -Path $ocPath -ApplyChanges
     Write-DailyTwinCheck -Name '落盘返回 status=applied' -Condition ($null -ne $applied -and $applied.status -eq 'applied') -Detail "得到：$($applied.status)"
     $backupFiles = @(Get-ChildItem -LiteralPath $ocDir -Filter '*.bak')
     Write-DailyTwinCheck -Name '落盘前先生成了备份' -Condition ($backupFiles.Count -eq 1) -Detail "找到 $($backupFiles.Count) 份"
@@ -334,13 +352,17 @@ try {
     Write-DailyTwinCheck -Name 'tools.alsoAllow 补上了 browser' -Condition (@($afterConfig.tools.alsoAllow) -contains 'browser')
     Write-DailyTwinCheck -Name 'browser.defaultProfile = openclaw' -Condition ($afterConfig.browser.defaultProfile -eq 'openclaw')
     Write-DailyTwinCheck -Name 'browser.snapshotDefaults.mode = efficient' -Condition ($afterConfig.browser.snapshotDefaults.mode -eq 'efficient')
-    Write-DailyTwinCheck -Name 'browser.userDataDir 指向 D 盘' -Condition ($afterConfig.browser.userDataDir -eq 'D:\DailyTwin\browser-profile')
+    # 中文注释：B30 —— 顶层 browser.userDataDir 是 OpenClaw 根本不读的键，写进去只会污染真机配置。
+    # 中文注释：userDataDir 只在 browser.profiles.<name>.userDataDir 下面有意义，而且只对 existing-session 驱动生效；
+    # 中文注释：受管浏览器用的是它自己固定的 user-data 目录，改不了。所以这里断言"这个键压根没被写出来"。
+    $browserKeys = @($afterConfig.browser.PSObject.Properties | ForEach-Object { $_.Name })
+    Write-DailyTwinCheck -Name '不再写入 OpenClaw 不读的顶层 browser.userDataDir' -Condition (-not ($browserKeys -contains 'userDataDir')) -Detail ($browserKeys -join ',')
     Write-DailyTwinCheck -Name '原有的浅层配置没被动过' -Condition ($afterConfig.tools.profile -eq 'coding' -and $afterConfig.gateway.port -eq 18789)
     Write-DailyTwinCheck -Name '原有的三层配置没被动过' -Condition ($afterConfig.tools.exec.strictInlineEval -eq $true -and $afterConfig.gateway.auth.mode -eq 'token')
     # 中文注释：这一条就是把"改配置反而写坏配置"钉死的回归断言。
     Write-DailyTwinCheck -Name '八层嵌套的原有配置完好无损（深度回归）' -Condition ($afterConfig.deep.l2.l3.l4.l5.l6.l7 -eq 'keep') -Detail $writtenText
 
-    $again = Invoke-DailyTwinProfileScript -Path $ocPath -ApplyChanges -DataDir 'D:\DailyTwin\browser-profile'
+    $again = Invoke-DailyTwinProfileScript -Path $ocPath -ApplyChanges
     Write-DailyTwinCheck -Name '重复执行报 already_ok（幂等）' -Condition ($null -ne $again -and $again.status -eq 'already_ok') -Detail "得到：$($again.status)"
     Write-DailyTwinCheck -Name '幂等执行不再生成新备份' -Condition (@(Get-ChildItem -LiteralPath $ocDir -Filter '*.bak').Count -eq 1)
 
@@ -377,6 +399,76 @@ try {
     $threw = $false
     try { $missingResult = Invoke-DailyTwinProfileScript -Path (Join-Path $ocDir 'nope.json') } catch { $threw = $true }
     Write-DailyTwinCheck -Name '配置文件不存在时抛错而不是凭空造一个' -Condition ($threw -and $null -eq $missingResult)
+
+    # 中文注释：B30b —— browser.snapshotDefaults.mode 是全局默认，OpenClaw 只认 efficient。
+    # 中文注释：full / aria 是"单次调用的 format 选择"，写成全局 mode 就是往真机配置里塞非法值。
+    # 中文注释：所以这个脚本的 -SnapshotMode 必须只收 efficient，其余一律被 ValidateSet 挡在门外。
+    foreach ($badMode in @('full', 'aria', 'ai')) {
+        $threw = $false
+        try { Invoke-DailyTwinProfileScript -Path $ocPath -SnapshotMode $badMode | Out-Null } catch { $threw = $true }
+        Write-DailyTwinCheck -Name "-SnapshotMode $badMode 被拒绝（全局默认只能是 efficient）" -Condition $threw
+    }
+
+    Write-Output '--- Invoke-DailyTwinBrowser.ps1 快照参数（真机 openclaw 2026.7.1-2 实测契约）---'
+    # 中文注释：这一段不是"断言我拼的字符串等于我想拼的字符串" —— 那种断言两边都是同一个信念，测不出东西。
+    # 中文注释：这里真的把脚本跑起来，用一个会把 argv 落盘的替身可执行文件顶替 openclaw，
+    # 中文注释：然后检查真实传出去的命令行。仍然只是单元测试（没有真的 OpenClaw），但至少测的是代码路径而不是我的记忆。
+    #
+    # 中文注释：契约来源 —— 真机 CLI 帮助 + 安装源码，不是文档：
+    # 中文注释：   efficient -> snapshot --efficient
+    # 中文注释：   full      -> snapshot --format ai
+    # 中文注释：   aria      -> snapshot --format aria
+    # 中文注释：最关键的一条是 aria 和 efficient 互斥（efficient 要求 format=ai），任何分支都不许两者同时出现。
+    $browserScript = Join-Path $PSScriptRoot 'Invoke-DailyTwinBrowser.ps1'
+    $stubDir = Join-Path $workRoot 'openclaw-stub'
+    $null = New-Item -ItemType Directory -Force -Path $stubDir
+    $argvPath = Join-Path $stubDir 'argv.txt'
+    if ($onWindows) {
+        $stubPath = Join-Path $stubDir 'openclaw-stub.cmd'
+        $stubText = "@echo off`r`necho %* > `"$argvPath`"`r`nexit /b 0`r`n"
+        [System.IO.File]::WriteAllText($stubPath, $stubText, (New-Object System.Text.ASCIIEncoding))
+    } else {
+        $stubPath = Join-Path $stubDir 'openclaw-stub.sh'
+        $stubText = "#!/bin/sh`nprintf '%s\n' `"`$@`" > '$argvPath'`nexit 0`n"
+        [System.IO.File]::WriteAllText($stubPath, $stubText, (New-Object System.Text.UTF8Encoding($false)))
+        & /usr/bin/chmod '755' $stubPath
+    }
+
+    function Get-DailyTwinStubArgv {
+        [CmdletBinding()]
+        param([Parameter(Mandatory = $true)][string]$Mode)
+        Remove-Item -LiteralPath $argvPath -Force -ErrorAction SilentlyContinue
+        & $browserScript -Action snapshot -SnapshotMode $Mode -OpenClawPath $stubPath | Out-Null
+        if (-not (Test-Path -LiteralPath $argvPath)) { return $null }
+        return ((Get-Content -LiteralPath $argvPath -Raw) -replace '\s+', ' ').Trim()
+    }
+
+    $stubSanity = Get-DailyTwinStubArgv -Mode 'efficient'
+    Write-DailyTwinCheck -Name '替身可执行文件真的被调用了（否则下面全是空断言）' -Condition ($null -ne $stubSanity -and $stubSanity -like '*browser*') -Detail "argv=$stubSanity"
+
+    $expectedArgv = @{
+        'efficient' = 'snapshot --efficient'
+        'full'      = 'snapshot --format ai'
+        'aria'      = 'snapshot --format aria'
+    }
+    foreach ($mode in @('efficient', 'full', 'aria')) {
+        $argv = Get-DailyTwinStubArgv -Mode $mode
+        Write-DailyTwinCheck -Name "-SnapshotMode $mode 传出的是 $($expectedArgv[$mode])" -Condition ($null -ne $argv -and $argv -like "*$($expectedArgv[$mode])*") -Detail "argv=$argv"
+        # 中文注释：互斥约束单独钉一条 —— 这是当初真机报错的直接原因，也是最容易再犯的一条。
+        $hasAria = $argv -like '*--format aria*'
+        $hasEfficient = $argv -like '*--efficient*'
+        Write-DailyTwinCheck -Name "-SnapshotMode $mode 没有把互斥的 aria 和 efficient 拼在一起" -Condition (-not ($hasAria -and $hasEfficient)) -Detail "argv=$argv"
+        # 中文注释：--mode 是 snapshot 的独立参数，本脚本从不使用它；出现即说明又拼回了被真机拒绝的老写法。
+        Write-DailyTwinCheck -Name "-SnapshotMode $mode 没有再拼出 --mode efficient 这种老写法" -Condition ($argv -notlike '*--mode*') -Detail "argv=$argv"
+    }
+
+    # 中文注释：full 不等于 aria —— 这是纠正的核心，两者是不同的提取格式，必须分别落到 ai 和 aria。
+    $fullArgv = Get-DailyTwinStubArgv -Mode 'full'
+    Write-DailyTwinCheck -Name 'full 走 --format ai，不等同于 ARIA' -Condition ($fullArgv -like '*--format ai*' -and $fullArgv -notlike '*aria*') -Detail "argv=$fullArgv"
+
+    $threw = $false
+    try { & $browserScript -Action snapshot -SnapshotMode 'nonsense' -OpenClawPath $stubPath | Out-Null } catch { $threw = $true }
+    Write-DailyTwinCheck -Name '未知 SnapshotMode 被 ValidateSet 拒绝' -Condition $threw
 } finally {
     $env:DAILY_TWIN_HOME = $originalHome
     Remove-Item -LiteralPath $workRoot -Recurse -Force -ErrorAction SilentlyContinue

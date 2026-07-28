@@ -187,17 +187,23 @@ function Resolve-DailyTwinPwsh {
     # 中文注释：     绝不退回去猜另一份 pwsh。函数注释从一开始就是这么承诺的，之前没做到。
     # 中文注释：其余一切（cmd.exe、notepad.exe……）一律 $null，带不带完整路径都一样 ——
     # 中文注释：曾经这里还有一个 -not IsPathRooted 条件，导致 C:\Windows\System32\cmd.exe 被原样放行。
-    if (-not [string]::IsNullOrWhiteSpace($Preferred)) {
-        $leaf = [System.IO.Path]::GetFileName($Preferred)
-        if ($leaf -notin @('pwsh', 'pwsh.exe')) { return $null }
+    # 中文注释：空、空白、$null 一律 $null。绝不能让空白落进后面的搜索分支 ——
+    # 中文注释：实测 ' '（一个空格）会一路走到兜底目录，返回系统里的 PowerShell 7。
+    if ([string]::IsNullOrWhiteSpace($Preferred)) { return $null }
 
-        # 中文注释：叶子名和原串不相等，说明前面还挂着目录，属于第 2 种输入。
-        if ($leaf -ne $Preferred) {
-            $explicit = Get-Command -Name $Preferred -CommandType Application -ErrorAction SilentlyContinue |
-                Select-Object -First 1
-            if ($explicit) { return $explicit.Source }
-            return $null
-        }
+    $leaf = [System.IO.Path]::GetFileName($Preferred)
+    if ($leaf -notin @('pwsh', 'pwsh.exe')) { return $null }
+
+    # 中文注释：叶子名和原串不相等，说明前面还挂着目录，属于第 2 种输入：「我就要这一个」。
+    if ($leaf -ne $Preferred) {
+        # 中文注释：这里必须用 -LiteralPath 做纯粹的存在性检查，不能用 Get-Command。
+        # 中文注释：Get-Command 会做通配符展开 —— 实测传 C:\Program Files\PowerShell\*\pwsh.exe
+        # 中文注释：它会解析成某一份真实的 PS7。调用方点名了一个位置，拿到的却是它挑的另一个，
+        # 中文注释：这正是这个函数一开始要修的毛病，用错工具就会原地复发。
+        # 中文注释：诊断对了、工具拿错了，比诊断错更难发现。
+        if ([System.Management.Automation.WildcardPattern]::ContainsWildcardCharacters($Preferred)) { return $null }
+        if (Test-Path -LiteralPath $Preferred -PathType Leaf) { return $Preferred }
+        return $null
     }
 
     $command = Get-Command -Name $Preferred -CommandType Application -ErrorAction SilentlyContinue |

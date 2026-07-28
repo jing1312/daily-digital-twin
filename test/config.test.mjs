@@ -129,6 +129,18 @@ test('snapshotMode 与 managedLoggedInHosts 的非法取值会被配置校验拦
     () => validateConfig(mergeConfig(DEFAULT_CONFIG, { browser: { snapshotMode: 'efficent' } })),
     (error) => error.code === 'invalid_config' && error.problems.some((p) => p.includes('snapshotMode'))
   );
+  // 中文注释：aria 是真机上确实存在的格式（snapshot --format aria），必须放行；
+  // 中文注释：ai 则不是本项目的对外取值 —— 对外叫 full，内部才映射成 --format ai，别把内部拼法漏成配置项。
+  for (const mode of ['efficient', 'full', 'aria']) {
+    assert.doesNotThrow(
+      () => validateConfig(mergeConfig(DEFAULT_CONFIG, { browser: { snapshotMode: mode } })),
+      `snapshotMode=${mode} 应当被接受`
+    );
+  }
+  assert.throws(
+    () => validateConfig(mergeConfig(DEFAULT_CONFIG, { browser: { snapshotMode: 'ai' } })),
+    (error) => error.code === 'invalid_config' && error.problems.some((p) => p.includes('snapshotMode'))
+  );
   assert.throws(
     () => validateConfig(mergeConfig(DEFAULT_CONFIG, { browser: { managedLoggedInHosts: 'feishu.cn' } })),
     (error) => error.problems.some((p) => p.includes('managedLoggedInHosts'))

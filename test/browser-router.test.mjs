@@ -98,13 +98,19 @@ test('未知 profile 名称被拒绝并列出可选值', () => {
 
 test('快照模式默认取 efficient 以压低上下文开销', () => {
   assert.equal(routeBrowserAction({ config: DEFAULT_CONFIG }).snapshotMode, 'efficient');
-  assert.equal(
-    routeBrowserAction({ config: { browser: { defaultProfile: 'openclaw', snapshotMode: 'full' } } }).snapshotMode,
-    'full'
-  );
+  // 中文注释：三个取值都要能原样透传到 PowerShell 侧，路由层不做任何改写。
+  // 中文注释：真机 openclaw 2026.7.1-2 的映射是 efficient -> --efficient、full -> --format ai、aria -> --format aria；
+  // 中文注释：full 不等于 aria，这一点在 Invoke-DailyTwinBrowser.ps1 的自检里钉死，这里只保证路由不吞值。
+  for (const mode of ['efficient', 'full', 'aria']) {
+    assert.equal(
+      routeBrowserAction({ config: { browser: { defaultProfile: 'openclaw', snapshotMode: mode } } }).snapshotMode,
+      mode,
+      `snapshotMode=${mode} 必须原样透传`
+    );
+  }
 });
 
-// 中文注释：以下是路线 C（受管隔离浏览器）落地后补的测试。
+// 中文注释：以下是路线 C（受管隔离浏览器）的路由层测试。
 // 中文注释：路线 C 的唯一代价是"每个站点要单独登录一次"，而这件事没有任何自动记录，
 // 中文注释：所以要在路由阶段就把"这个站点还没登录过"讲清楚，而不是让任务停在登录页再去猜原因。
 

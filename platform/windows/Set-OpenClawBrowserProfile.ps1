@@ -31,12 +31,12 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$ConfigPath,
 
-    # 中文注释：受管浏览器的用户数据目录。留空则不写这一项，交给 OpenClaw 用它自己的默认位置。
-    # 中文注释：显式指向 D 盘是本项目的磁盘策略（C 盘要留出余量）。
-    [string]$ManagedUserDataDir,
-
-    # 中文注释：页面快照模式。efficient 明显省 token，是本项目默认。
-    [ValidateSet('efficient', 'full')]
+    # 中文注释：全局默认快照模式，写进 browser.snapshotDefaults.mode。
+    # 中文注释：这个键只接受 'efficient' —— 真机 CLI 的 --mode 也只有 <efficient> 这一个值。
+    # 中文注释：full / aria 不是"模式"，是调用时的格式选择（--format ai / --format aria），
+    # 中文注释：属于每次调用的决定，不该写进全局默认里。曾经这里允许过 full，
+    # 中文注释：那会把一个 OpenClaw 不认的值写进她真实的 openclaw.json。
+    [ValidateSet('efficient')]
     [string]$SnapshotMode = 'efficient',
 
     # 中文注释：默认只预览。没有这个开关就绝不写文件。
@@ -134,13 +134,16 @@ if ($currentSnapshot -ne $SnapshotMode) {
         -Why '精简快照能明显压低每次页面操作的 token 消耗'
 }
 
-if (-not [string]::IsNullOrWhiteSpace($ManagedUserDataDir)) {
-    $currentDataDir = Get-DailyTwinProperty -InputObject $browser -Name 'userDataDir' -Default '(未设置)'
-    if ($currentDataDir -ne $ManagedUserDataDir) {
-        Add-Member -InputObject $browser -NotePropertyName 'userDataDir' -NotePropertyValue $ManagedUserDataDir -Force
-        Add-DailyTwinChange -Path 'browser.userDataDir' -From $currentDataDir -To $ManagedUserDataDir `
-            -Why '受管浏览器的登录态存在这里；放 D 盘以符合磁盘策略'
-    }
+# 中文注释：这里曾经写过一个顶层 browser.userDataDir，那是错的 —— OpenClaw 根本不读它。
+# 中文注释：文档里 userDataDir 只存在于 browser.profiles.<name>.userDataDir，而且是给
+# 中文注释：existing-session 驱动用的（让它去附着一个非默认的 Chromium 用户目录）；
+# 中文注释：受管浏览器"仍然使用它自己的用户数据目录"，位置是固定的，配置改不了。
+# 中文注释：写一个不被读取的键，等于在回执里承诺一件不会发生的事，所以整段删掉。
+#
+# 中文注释：改成如实报告登录态真正落在哪儿 —— 这是备份策略和磁盘策略真正要盯的路径。
+$managedUserDataDir = $null
+if (-not [string]::IsNullOrWhiteSpace($env:OPENCLAW_HOME)) {
+    $managedUserDataDir = Join-Path $env:OPENCLAW_HOME '.openclaw\browser\openclaw\user-data'
 }
 
 # ---- 输出与落盘 ----
@@ -233,10 +236,14 @@ Write-DailyTwinResult -InputObject ([pscustomobject]@{
     blockers       = $blockers
     backupPath     = $backupPath
     rollbackCommand = if ($backupPath) { "Copy-Item -LiteralPath '$backupPath' -Destination '$ConfigPath' -Force" } else { $null }
+    # 中文注释：只报告，不设置 —— 这个位置由 OpenClaw 固定，配置改不了。
+    # 中文注释：$null 表示没设 OPENCLAW_HOME，此时由 OpenClaw 自行决定，本脚本不猜。
+    managedUserDataDir = $managedUserDataDir
     nextSteps      = @(
         '重启 OpenClaw 网关，让新配置生效。',
         'openclaw browser status —— 确认 browser 工具这次真的可用。',
         '在受管浏览器里把常用站点逐个登录一次（这是路线 C 唯一的一次性代价）。',
+        '登录态落在 managedUserDataDir 那个目录里，位置固定、改不了；备份和磁盘策略盯这个路径。',
         '把登录过的域名写进替身私有目录 config/runtime.json 的 browser.managedLoggedInHosts。'
     )
 })

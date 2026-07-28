@@ -17,9 +17,17 @@
 单独登录一次。这是唯一"文档覆盖 + 无人值守 + 不需要你坐在电脑前"的组合。
 
 > **2026-07-28 决定：正式采用路线 C（受管隔离浏览器）。**
-> 配套落地物：`platform/windows/Set-OpenClawBrowserProfile.ps1`（改 `openclaw.json`，默认只预览）、
+> 已就绪的配套物：`platform/windows/Set-OpenClawBrowserProfile.ps1`（改 `openclaw.json`，默认只预览）、
+> `platform/windows/Invoke-DailyTwinBrowser.ps1`（单个浏览器动作的封装）、
+> `src/core/browser-router.mjs`（profile 选择与登录态警告）、
 > `browser.managedLoggedInHosts`（登记哪些站点已经在受管浏览器里登录过）。
 > 路线 B 和路线 A 的说明保留，作为将来切换时的依据，但**当前不是默认**。
+>
+> **范围：以上只是配置与工具准备，尚未接入生产任务链。** 飞书任务进来之后，目前
+> **不会**走到浏览器 —— `routeBrowserAction()` 只有测试在调用，`Invoke-DailyTwinBrowser.ps1`
+> 也还没有生产调用点。接线（飞书任务 → 路由 → 浏览器执行 → 证据验证 → 回执）
+> 放在单独一个 PR 里做，并且那个 PR 必须带**真实 OpenClaw 集成验证**：
+> 本仓库现有的浏览器断言都只是单元测试，证明不了真机行为。
 
 ## 三个原因，按发生顺序
 
@@ -101,7 +109,13 @@
 
 ## 三条可选路线
 
-### 路线 C：受管隔离浏览器（**已采用**）
+### 路线 C：受管隔离浏览器（**已选定，配置与工具已就绪；尚未接入生产任务链**）
+
+> **先把话说清楚**：本仓库目前只完成了路线 C 的**配置准备**和**单个浏览器动作的封装**。
+> "飞书任务 → 路由 → 浏览器执行 → 证据验证 → 回执"这条链路**还没有接起来** ——
+> `routeBrowserAction()` 目前只有测试在调用，`Invoke-DailyTwinBrowser.ps1` 也还没有任何
+> 生产调用点。接线会放在单独一个 PR 里做，并且那个 PR 必须带上**真实 OpenClaw 集成验证**；
+> 本仓库现有的浏览器相关断言都只是单元测试，证明不了"在真机上跑得通"。
 
 `browser.defaultProfile: "openclaw"`。替身用自己的一份持久化用户数据目录，与你日常浏览器
 完全隔离。
@@ -120,12 +134,29 @@
 .\platform\windows\Set-OpenClawBrowserProfile.ps1 -ConfigPath 'D:\...\openclaw.json'
 
 # 第二步：确认无误后再落盘（会先生成时间戳 .bak，并打印一行回滚命令）
-.\platform\windows\Set-OpenClawBrowserProfile.ps1 -ConfigPath 'D:\...\openclaw.json' `
-    -ManagedUserDataDir 'D:\DailyTwin\browser-profile' -Apply
+.\platform\windows\Set-OpenClawBrowserProfile.ps1 -ConfigPath 'D:\...\openclaw.json' -Apply
 ```
 
 脚本会做三件事，对应上文三个原因：`tools.alsoAllow` 补 `browser`、检查 `plugins.allow`、
-建根级 `browser` 配置块（`defaultProfile` / `snapshotDefaults.mode` / `userDataDir`）。
+建根级 `browser` 配置块（`defaultProfile` / `snapshotDefaults.mode`）。
+
+#### 受管浏览器的登录态存在哪儿：位置固定，配不出来
+
+这里曾经有一个错误的做法：脚本会写一个顶层 `browser.userDataDir`，文档也告诉你可以把它
+指到 D 盘。**这个键 OpenClaw 根本不读**，已经删掉。
+
+`userDataDir` 只在 `browser.profiles.<name>.userDataDir` 下面存在，而且是给
+`driver: "existing-session"` 用的（让它去附着一个非默认的 Chromium 用户目录）。
+受管浏览器仍然使用它自己的用户数据目录，位置固定：
+
+```text
+%OPENCLAW_HOME%\.openclaw\browser\openclaw\user-data
+```
+
+所以磁盘策略和备份策略要盯的是**这个**路径，办法是把 `OPENCLAW_HOME` 放在 D 盘
+（本项目本来就是这么配的），而不是去写一个不生效的配置项。脚本回执里的
+`managedUserDataDir` 字段就是照着当前 `OPENCLAW_HOME` 算出来的实际位置；
+没设 `OPENCLAW_HOME` 时它是 `null` —— 脚本不替 OpenClaw 猜默认值。
 
 有两种情况它会**拒绝自动改**，只报告让你自己决定：
 
@@ -186,8 +217,41 @@
 
 - `browser.snapshotDefaults.mode: "efficient"` —— 页面快照走精简模式，token 消耗明显下降。
   本项目 `config/runtime.example.json` 里 `browser.snapshotMode` 默认就是 `efficient`。
+  注意这是**全局默认**，而且只在调用方**没有**显式指定格式时才生效；它只接受 `efficient`
+  这一个值，所以 `Set-OpenClawBrowserProfile.ps1` 的 `-SnapshotMode` 也只收 `efficient`。
 - `browser.tabCleanup.enabled`（默认 `true`）—— 只会清理 **OpenClaw 自己用 `action: "open"`
   打开的**标签页，不会碰你手动开的标签。所以它不是"会不会关掉我的页面"的风险项。
+
+## 快照参数：三档映射，以及 aria 和 efficient 为什么不能同时给
+
+`Invoke-DailyTwinBrowser.ps1` 的 `-SnapshotMode` 有三个取值，映射到三条**互不重叠**的
+CLI 写法：
+
+| `-SnapshotMode` | 实际发出的参数 | 说明 |
+| --- | --- | --- |
+| `efficient`（默认） | `snapshot --efficient` | 精简提取，最省 token |
+| `full` | `snapshot --format ai` | AI 格式的完整提取 |
+| `aria` | `snapshot --format aria` | 无障碍树（accessibility tree） |
+
+三件必须记住的事：
+
+1. **`aria` 和 `efficient` 互斥。** `--efficient` 要求 `format=ai`，所以
+   `--format aria --efficient` 会被 OpenClaw 拒绝。自检里有一条断言专门钉死
+   "任何分支都不会把这两个拼在一起"。
+2. **`full` 不等于 ARIA。** 这是两种不同的提取格式，`full` 走 `--format ai`。
+3. **显式给 `--format` 会压住全局默认。** `browser.snapshotDefaults.mode: "efficient"`
+   只在调用方没有显式指定格式时才生效，所以 `full` / `aria` 这两档能如实拿到你要的格式。
+
+**这套契约的来源是真机上 openclaw `2026.7.1-2` 的 CLI 帮助和安装源码，不是文档。**
+官方文档在这里不完整：`/cli/browser` 页面只写了 `snapshot` 和 `snapshot --urls`，
+而 `openclaw browser snapshot --help` 这个子命令帮助只显示 `-h`。
+`openclaw browser --help` 才给出了 `snapshot --format aria --limit 200` 和
+`snapshot --efficient` 这两个例子。
+
+> 踩过的坑，两次，方向相反：先是凭"无障碍树就叫 ARIA"的直觉拼出了
+> `--format aria --mode efficient`（格式名蒙对了，但组合非法）；被真机拒绝后又走到另一个
+> 极端，根据子命令帮助只显示 `-h` 判定"这些参数根本不存在"。**帮助信息不完整不能当作参数
+> 不存在的证据。** 详见 `docs/BUGFIX-LOG.md` 的 B29。
 
 ## 本项目怎么配
 
@@ -252,7 +316,13 @@
 - [ ] `tools.alsoAllow: ["browser"]` 后，`openclaw browser status` 能正常返回。
 - [ ] 受管浏览器（路线 C）里一次性登录后，重启网关登录态仍然保留。
 - [ ] 路线 B 的扩展在 Chrome 上配对成功，徽标变 ON。
-- [ ] 路线 B 的扩展能否在 Edge 上加载并配对（这一条是本项目目前**唯一**的未知项）。
+- [ ] 路线 B 的扩展能否在 Edge 上加载并配对。
+- [ ] **三档快照参数在真机上都被接受**：`openclaw browser snapshot --efficient`、
+      `--format ai`、`--format aria` 各跑一次，确认都返回内容而不是参数错误。
+      仓库里那组断言是拿一个会把 argv 落盘的替身可执行文件测的，只能证明
+      「代码拼出了这些参数」，证明不了「OpenClaw 接受这些参数」。
+- [ ] `%OPENCLAW_HOME%\.openclaw\browser\openclaw\user-data` 确实是登录态落盘的位置
+      （一次性登录后去这个目录看有没有东西），确认备份策略盯对了路径。
 
 沙箱里能证明的部分只有：脚本在 PowerShell 7.6.4 上语法通过、PSScriptAnalyzer 无
 Error/Warning、预览不写盘、落盘先备份且备份逐字节一致、两条闸门都会拒绝落盘、重复执行幂等、

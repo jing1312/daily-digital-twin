@@ -129,8 +129,9 @@ export function validateConfig(config) {
 
   // 中文注释：snapshotMode 会被原样传给 Invoke-DailyTwinBrowser.ps1 的 ValidateSet，
   // 中文注释：在这里拦下拼写错误，好过等到 PowerShell 侧抛一个看不懂的参数校验错误。
-  if (!['efficient', 'full'].includes(config.browser?.snapshotMode)) {
-    problems.push("browser.snapshotMode 只能是 'efficient' 或 'full'");
+  // 中文注释：三个值分别对应 --efficient / --format ai / --format aria，映射见那个脚本里的实测说明。
+  if (!['efficient', 'full', 'aria'].includes(config.browser?.snapshotMode)) {
+    problems.push("browser.snapshotMode 只能是 'efficient'、'full' 或 'aria'");
   }
 
   if (!Array.isArray(config.browser?.managedLoggedInHosts)) {

@@ -108,6 +108,12 @@ npm run runtime -- init
 
 ## 3b. 切到路线 C：受管隔离浏览器（改 `openclaw.json`）
 
+> **范围提醒：这一步只是把配置和工具准备好，浏览器还没有接进生产任务链。**
+> 也就是说，做完这一步之后，你从飞书发一个"打开某网页并截图"的任务，**它不会真的去开浏览器** ——
+> `routeBrowserAction()` 目前只有测试在调用，`Invoke-DailyTwinBrowser.ps1` 也还没有生产调用点。
+> 接线（飞书任务 → 路由 → 浏览器执行 → 证据验证 → 回执）放在单独一个 PR 里做。
+> 现在做这一步的意义是：把 `openclaw.json` 改对、把手动验证的路子铺好。
+
 前提：第 3 步的备份已经做完。这一步会真的改你机器上的 `openclaw.json`。
 
 为什么"让替身用 Edge"一直不成功、以及为什么选路线 C，完整推导在
@@ -118,17 +124,22 @@ npm run runtime -- init
 .\platform\windows\Set-OpenClawBrowserProfile.ps1 -ConfigPath <openclaw.json 的完整路径>
 
 # 2) 确认无误后落盘。会先生成时间戳 .bak，并打印一行回滚命令
-.\platform\windows\Set-OpenClawBrowserProfile.ps1 -ConfigPath <openclaw.json 的完整路径> `
-    -ManagedUserDataDir 'D:\DailyTwin\browser-profile' -Apply
+.\platform\windows\Set-OpenClawBrowserProfile.ps1 -ConfigPath <openclaw.json 的完整路径> -Apply
 ```
 
 参数：
 
 - `-ConfigPath`（必填）：`openclaw.json` 的完整路径。
-- `-ManagedUserDataDir`：受管浏览器的用户数据目录。**放 D 盘**，符合本项目的磁盘策略；
-  留空则交给 OpenClaw 用它自己的默认位置。
-- `-SnapshotMode`：`efficient`（默认，省 token）或 `full`。
+- `-SnapshotMode`：**只接受 `efficient`**。这一项写的是 `browser.snapshotDefaults.mode`，
+  是个全局默认，OpenClaw 只认这一个值。`full` / `aria` 是**单次调用**的格式选择，
+  由 `Invoke-DailyTwinBrowser.ps1 -SnapshotMode` 决定，不能写成全局默认。
 - `-Apply`：不加这个开关，脚本绝不写任何文件。
+
+原来还有一个 `-ManagedUserDataDir` 参数，**已经删掉**。它写出来的顶层 `browser.userDataDir`
+是 OpenClaw 根本不读的键，等于在回执里承诺一件不会发生的事。受管浏览器的登录态固定落在
+`%OPENCLAW_HOME%\.openclaw\browser\openclaw\user-data`，位置改不了；要让它待在 D 盘，
+办法是把 `OPENCLAW_HOME` 放在 D 盘（第 2 步已经这么做了）。回执里的 `managedUserDataDir`
+字段会照当前 `OPENCLAW_HOME` 算出实际路径，备份和磁盘策略盯这个路径就行。
 
 回执里的 `status` 有四种：`preview`（只预览）、`applied`（已落盘）、`already_ok`（本来就对，
 重复跑不会重复改）、`blocked`（有需要你自己决定的冲突，见下）。
