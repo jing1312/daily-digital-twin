@@ -7,8 +7,13 @@
     "node": ">=24"
   },
   "scripts": {
-    "test": "node --test",
-    "audit:privacy": "node scripts/privacy-audit.mjs",
-    "runtime": "node src/runtime.mjs"
+    "test": "node --disable-warning=ExperimentalWarning --test",
+    "audit:privacy": "node --disable-warning=ExperimentalWarning scripts/privacy-audit.mjs",
+    "smoke": "bash .github/scripts/cli-smoke.sh",
+    "lint:ps": "pwsh -NoProfile -File scripts/lint-powershell.ps1",
+    "selftest:ps": "pwsh -NoProfile -File platform/windows/Test-DailyTwinPlatform.ps1",
+    "runtime": "node --disable-warning=ExperimentalWarning src/runtime.mjs",
+    "doctor": "node --disable-warning=ExperimentalWarning src/runtime.mjs doctor",
+    "check": "npm test && npm run audit:privacy && npm run smoke"
   }
 }

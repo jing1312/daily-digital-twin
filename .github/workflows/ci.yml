@@ -1,0 +1,147 @@
+name: CI
+
+# 中文注释：这个仓库是公开的，所以 CI 的第一职责不只是"跑测试"，还包括"别把私密信息推上来"。
+# 中文注释：隐私审计和单元测试同等重要，任何一个失败都算失败。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  node:
+    name: Node 测试与隐私审计
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          # 中文注释：本项目零依赖、没有 lock 文件，开缓存反而会报错。
+          package-manager-cache: false
+
+      - name: 确认仍然零依赖
+        run: |
+          node -e "
+            const pkg = require('./package.json');
+            const declared = [
+              ...Object.keys(pkg.dependencies ?? {}),
+              ...Object.keys(pkg.devDependencies ?? {})
+            ];
+            if (declared.length > 0) {
+              console.error('本项目约定零依赖，但发现：' + declared.join(', '));
+              process.exit(1);
+            }
+            console.log('零依赖检查通过');
+          "
+
+      - name: 单元测试
+        run: node --disable-warning=ExperimentalWarning --test
+
+      - name: 隐私审计（密钥 / 真实本机路径 / 中转地址 / 运行数据）
+        run: node --disable-warning=ExperimentalWarning scripts/privacy-audit.mjs
+
+      - name: CLI 冒烟测试
+        shell: bash
+        run: bash .github/scripts/cli-smoke.sh
+
+  windows:
+    name: Windows PowerShell 5.1 / 7 验证
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: 确认检出后的 .ps1 仍是 UTF-8 BOM + CRLF
+        shell: pwsh
+        run: |
+          # 中文注释：靠 .gitattributes 的 eol=crlf 保证；这里做一次实测，防止配置被改掉。
+          $bad = @()
+          Get-ChildItem platform/windows -Filter *.ps1 -File | ForEach-Object {
+            $bytes = [System.IO.File]::ReadAllBytes($_.FullName)
+            $hasBom = ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)
+            $text = [System.IO.File]::ReadAllText($_.FullName)
+            $lonelyLf = ([regex]::Matches($text, "(?<!`r)`n")).Count
+            if (-not $hasBom) { $bad += "$($_.Name) 缺少 BOM" }
+            if ($lonelyLf -gt 0) { $bad += "$($_.Name) 有 $lonelyLf 处裸 LF" }
+          }
+          if ($bad.Count -gt 0) { $bad | ForEach-Object { Write-Output $_ }; exit 1 }
+          Write-Output '编码检查通过'
+
+      - name: Windows PowerShell 5.1 语法解析（5.1 语法的权威判定）
+        shell: powershell
+        run: |
+          $PSVersionTable.PSVersion
+          & .\scripts\lint-powershell.ps1 -SkipAnalyzer
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Windows PowerShell 5.1 运行时自检
+        shell: powershell
+        run: |
+          & .\platform\windows\Test-DailyTwinPlatform.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: 安装 PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          if (-not (Get-Module -ListAvailable -Name PSScriptAnalyzer)) {
+            Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+            Install-Module -Name PSScriptAnalyzer -Scope CurrentUser -Force
+          }
+          Get-Module -ListAvailable -Name PSScriptAnalyzer | Select-Object Name, Version
+
+      - name: PSScriptAnalyzer（含 5.1/7.0 语法兼容规则）
+        shell: pwsh
+        run: |
+          & ./scripts/lint-powershell.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: PowerShell 7 运行时自检
+        shell: pwsh
+        run: |
+          & ./platform/windows/Test-DailyTwinPlatform.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: PowerShell 写遥测、Node 读遥测（跨语言联调）
+        shell: pwsh
+        run: |
+          # 中文注释：变量名刻意不叫 $home —— $HOME 是 PowerShell 的自动变量，正是 B18 那一类坑。
+          $privateHome = Join-Path $env:RUNNER_TEMP 'daily-twin-telemetry-home'
+          node --disable-warning=ExperimentalWarning src/runtime.mjs init --home $privateHome
+          & ./platform/windows/Write-DailyTwinTelemetry.ps1 -PrivateHome $privateHome
+          $telemetryPath = Join-Path $privateHome 'data/telemetry.json'
+          $bytes = [System.IO.File]::ReadAllBytes($telemetryPath)
+          if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+            Write-Output '遥测文件带了 BOM，Node 的 JSON.parse 会直接抛错'
+            exit 1
+          }
+          $telemetry = Get-Content -Raw $telemetryPath | ConvertFrom-Json
+          Write-Output "PowerShell 写入：cpuPercent=$($telemetry.cpuPercent) onAcPower=$($telemetry.onAcPower)"
+          # 中文注释：真实 Windows 上 CIM 一定拿得到 CPU 和电源状态，null 说明取值路径有问题。
+          if ($null -eq $telemetry.cpuPercent) { Write-Output '没能采到 CPU 占用'; exit 1 }
+          if ($null -eq $telemetry.onAcPower) { Write-Output '没能判断电源状态'; exit 1 }
+          $doctor = node --disable-warning=ExperimentalWarning src/runtime.mjs doctor --home $privateHome | ConvertFrom-Json
+          Write-Output "Node 读到的来源：cpu=$($doctor.telemetrySources.cpu) power=$($doctor.telemetrySources.power)"
+          if ($doctor.telemetrySources.power -ne 'file') {
+            Write-Output "Node 没有采纳 PowerShell 写的电源状态：$($doctor.telemetryReasons.power)"
+            exit 1
+          }
+          if ($doctor.resourcePolicy.acceptsNewActions -ne $true) {
+            Write-Output "Node 侧拒绝执行动作，原因：$($doctor.resourcePolicy.reason) 缺失字段：$($doctor.resourcePolicy.missing -join ', ')"
+            exit 1
+          }
+          Write-Output "槽位上限：$($doctor.resourcePolicy.slotLimit)"
