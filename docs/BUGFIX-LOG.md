@@ -315,6 +315,59 @@
 
 ---
 
+## B26 `-Apply -WhatIf` 会报告一次没发生过的写盘
+
+**来源：** PR #1 上 Copilot 代码审查提出，复核后确认成立，且比它描述的更严重。
+
+`Set-OpenClawBrowserProfile.ps1` 里 `$backupPath` 是在 `ShouldProcess` **之前**赋值的，
+`status` 又只看 `$Apply` 这个开关。于是加了 `-Apply -WhatIf`（或者交互确认时选「否」）时：
+
+- 实际什么都没写、也没生成 `.bak`；
+- 回执却报 `status: applied`，还给出一个 `rollbackCommand`，指向一个**根本不存在的备份文件**。
+
+照着那条命令回滚，`Copy-Item` 会因为源文件不存在而报错——在真出事、急着回滚的时候。
+
+这和当初「VS Code 明明没装，却报告已经打开」是同一类错误：**报告一件没发生过的事**。
+整个替身项目的执行校验机制就是为了根治这类问题，结果我自己在新脚本里又犯了一次。
+
+**改法：** 引入 `$applied` 标记；`$backupPath` 只有在 `Test-Path` 确认备份实体存在之后才赋值；
+`status` 改看 `$applied`。被 `-WhatIf` 拦下的情况如实报 `preview`——因为结果确实和预览一模一样。
+
+**负向对照：** 用修复前的脚本跑新增的 5 条断言，其中 3 条挂掉，
+分别是 `得到：applied`、`backupPath` 指向一个不存在的 `.bak`、`rollbackCommand` 非空。
+
+---
+
+## B27 URL 前面粘一个全角空格，登录态提示就退化成泛泛而谈
+
+**来源：** 同一轮 Copilot 审查。**它给的理由是错的，但结论碰巧是对的。**
+
+它说 `hostnameOf` 判空用了 `url.trim()`、解析却传原始 `url`，所以带空格的 URL 会解析失败。
+实测下来不是这样：WHATWG 的 `new URL()` 自己就会剥掉首尾的半角空格和 C0 控制符，
+Tab／换行更是在任意位置都会被移除。**它举的例子本来就是好的。**
+
+但它无意中戳中了另一个真问题：`new URL()` **不认全角空格 U+3000 和不换行空格 U+00A0**，
+而 JS 的 `trim()` 认。任务文本是她用中文输入法从手机上打过来的，**全角空格是常态**。
+
+| 输入 | 修复前 | 修复后 |
+|---|---|---|
+| `'  https://feishu.cn/docs  '`（半角） | `feishu.cn` | `feishu.cn` |
+| `'\nhttps://feishu.cn/docs\t'` | `feishu.cn` | `feishu.cn` |
+| `'\u3000https://feishu.cn/docs'`（全角空格） | **`null`** | `feishu.cn` |
+| `'\u00a0https://feishu.cn/docs'` | **`null`** | `feishu.cn` |
+| `'https://feishu.cn/docs\u3000'`（全角在尾部） | `feishu.cn` | `feishu.cn` |
+
+后果不是崩溃，是**静默降级**：`signedInHostKnown` 从 `true`/`false` 掉成 `null`，
+本来能说「feishu.cn 已登记过登录态」的具体提示，退回成「这个 profile 不带你日常浏览器的登录态」的套话。
+不致命，但正好废掉了这一轮新加的那套提示。
+
+**改法：** 解析也用 `trim()` 之后的串。
+
+**负向对照：** 新增的这条测试如果只测半角空格就是**白测**（修复前后都过）。
+所以断言用的是 U+3000 和 U+00A0；把 `hostnameOf` 换回修复前的实现，这条测试立刻挂。
+
+---
+
 ## 偏离原计划的地方（7 条，全部有意为之）
 
 | # | 偏离 | 原因 |

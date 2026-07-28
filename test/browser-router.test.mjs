@@ -154,6 +154,22 @@ test('URL 取不出主机名时退回通用提示，不做半截匹配', () => {
   assert.ok(route.warnings.some((text) => /单独登录/.test(text)));
 });
 
+// 中文注释：这条盯的是全角空格。半角空格和 Tab/换行 new URL() 自己会处理，测了也白测；
+// 中文注释：U+3000（中文输入法的空格）和 U+00A0 它不认，而任务文本正是从手机中文输入法来的。
+test('URL 前面粘了全角空格照样能取出主机名', () => {
+  assert.equal(hostnameOf('\u3000https://Example.COM/x'), 'example.com', '全角空格 U+3000');
+  assert.equal(hostnameOf('\u00a0https://feishu.cn/docs'), 'feishu.cn', '不换行空格 U+00A0');
+  assert.equal(hostnameOf('  https://feishu.cn/docs  '), 'feishu.cn', '半角空格（本来就该过）');
+  assert.equal(hostnameOf('\u3000\u00a0 \t'), null, '全是空白仍然算取不出主机名');
+  const route = routeBrowserAction({
+    url: '\u3000https://feishu.cn/docs',
+    requiresSignedInSession: true,
+    config: { browser: { defaultProfile: 'openclaw', managedLoggedInHosts: ['feishu.cn'] } }
+  });
+  assert.equal(route.signedInHostKnown, true, '一个全角空格不该把已登记的域名打回未知');
+  assert.ok(route.warnings.some((text) => text.includes('feishu.cn 已登记')));
+});
+
 test('使用真实登录态的 profile 不需要登记表', () => {
   const route = routeBrowserAction({
     url: 'https://mail.example.com/inbox',

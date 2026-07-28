@@ -159,20 +159,26 @@ if ($changes.Count -eq 0) {
     }
 }
 
+# 中文注释：$backupPath / $applied 只有在真的落了盘之后才会被赋值。
+# 中文注释：-WhatIf 或者交互确认时选了「否」，ShouldProcess 返回 $false，这里什么都不会发生，
+# 中文注释：回执就必须如实说「什么都没做」——不能给出一个指向不存在文件的 rollbackCommand。
 $backupPath = $null
+$applied = $false
 if ($Apply -and $changes.Count -gt 0) {
     if ($blockers.Count -gt 0) {
         throw '存在需要你自己决定的冲突项（见上面的 Warning），已中止，未改动任何文件。'
     }
 
     $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-    $backupPath = "$ConfigPath.$stamp.bak"
-    if ($PSCmdlet.ShouldProcess($ConfigPath, "备份到 $backupPath 后写入新配置")) {
+    $plannedBackupPath = "$ConfigPath.$stamp.bak"
+    if ($PSCmdlet.ShouldProcess($ConfigPath, "备份到 $plannedBackupPath 后写入新配置")) {
         # 中文注释：先备份再写。备份用 Copy-Item，源文件保持原样。
-        Copy-Item -LiteralPath $ConfigPath -Destination $backupPath -ErrorAction Stop
-        if (-not (Test-Path -LiteralPath $backupPath -PathType Leaf)) {
-            throw "备份没有生成，已放弃写入：$backupPath"
+        Copy-Item -LiteralPath $ConfigPath -Destination $plannedBackupPath -ErrorAction Stop
+        if (-not (Test-Path -LiteralPath $plannedBackupPath -PathType Leaf)) {
+            throw "备份没有生成，已放弃写入：$plannedBackupPath"
         }
+        # 中文注释：确认备份实体存在之后才对外承认它，回执里的路径必然是真实存在的文件。
+        $backupPath = $plannedBackupPath
         # 中文注释：Write-DailyTwinJsonFile 走 .tmp + Move-Item，写无 BOM 的 UTF-8，
         # 中文注释：并且会按对象实际嵌套深度给 ConvertTo-Json -Depth（默认 6 层不够时会截断成 "@{...}"）。
         # 中文注释：openclaw.json 由 Node 侧读取，带 BOM 会让部分 JSON 解析器报错。
@@ -209,6 +215,8 @@ if ($Apply -and $changes.Count -gt 0) {
             Copy-Item -LiteralPath $backupPath -Destination $ConfigPath -Force
             throw "写入后的校验失败（$verifyFailure），已用备份还原原文件。备份仍保留：$backupPath"
         }
+        # 中文注释：走到这里才算「写了并且校验过」，applied 这个词才配用。
+        $applied = $true
     }
 } elseif ($changes.Count -gt 0) {
     Write-Output ''
@@ -216,7 +224,9 @@ if ($Apply -and $changes.Count -gt 0) {
 }
 
 Write-DailyTwinResult -InputObject ([pscustomobject]@{
-    status         = if ($blockers.Count -gt 0) { 'blocked' } elseif ($changes.Count -eq 0) { 'already_ok' } elseif ($Apply) { 'applied' } else { 'preview' }
+    # 中文注释：applied 只在 $applied 为真时出现。加了 -Apply 但被 -WhatIf / 确认框拦下来的，
+    # 中文注释：结果和预览完全一样（没有落盘），所以就如实报 preview。
+    status         = if ($blockers.Count -gt 0) { 'blocked' } elseif ($changes.Count -eq 0) { 'already_ok' } elseif ($applied) { 'applied' } else { 'preview' }
     configPath     = $ConfigPath
     route          = 'C: 受管隔离浏览器（browser.defaultProfile = openclaw）'
     changes        = $changes

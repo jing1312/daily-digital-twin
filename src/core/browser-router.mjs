@@ -57,9 +57,16 @@ export function describeProfile(name) {
 
 // 中文注释：从 URL 里取出主机名。取不到就返回 null —— 宁可不判断，也不要拿半截字符串去匹配。
 export function hostnameOf(url) {
-  if (typeof url !== 'string' || url.trim().length === 0) return null;
+  if (typeof url !== 'string') return null;
+  // 中文注释：任务文本是人从手机上打过来的，URL 前后粘上空白是常态。
+  // 中文注释：WHATWG 的 new URL() 自己会去掉半角空格和 Tab/换行，所以那几种本来就没问题；
+  // 中文注释：但它不认全角空格 U+3000 和不换行空格 U+00A0 —— 中文输入法打出来的恰恰是全角空格。
+  // 中文注释：'　https://feishu.cn' 会让 new URL() 直接抛错，hostname 退化成 null，
+  // 中文注释：登录态提示就从「具体到 feishu.cn」掉回「泛泛而谈」。JS 的 trim() 认这两个，所以用 trim 之后的串去解析。
+  const trimmed = url.trim();
+  if (trimmed.length === 0) return null;
   try {
-    const hostname = new URL(url).hostname.toLowerCase();
+    const hostname = new URL(trimmed).hostname.toLowerCase();
     return hostname.length > 0 ? hostname : null;
   } catch {
     return null;

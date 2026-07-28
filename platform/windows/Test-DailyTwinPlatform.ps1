@@ -237,10 +237,12 @@ try {
         param(
             [Parameter(Mandatory = $true)][string]$Path,
             [switch]$ApplyChanges,
+            [switch]$DryRun,
             [string]$DataDir
         )
         $parameters = @{ ConfigPath = $Path; WarningAction = 'SilentlyContinue' }
         if ($ApplyChanges) { $parameters['Apply'] = $true }
+        if ($DryRun) { $parameters['WhatIf'] = $true }
         if (-not [string]::IsNullOrWhiteSpace($DataDir)) { $parameters['ManagedUserDataDir'] = $DataDir }
         $captured = @(& $script:openClawScript @parameters)
         $line = @($captured | Where-Object { $_ -is [string] -and $_.StartsWith('{') }) | Select-Object -Last 1
@@ -263,6 +265,16 @@ try {
     Write-DailyTwinCheck -Name '预览列出了待改项' -Condition ($null -ne $preview -and @($preview.changes).Count -gt 0)
     Write-DailyTwinCheck -Name '预览一个字节都没改' -Condition (([System.IO.File]::ReadAllText($ocPath, $utf8NoBom)) -eq $originalText)
     Write-DailyTwinCheck -Name '预览不生成备份' -Condition (@(Get-ChildItem -LiteralPath $ocDir -Filter '*.bak').Count -eq 0)
+
+    # 中文注释：-Apply -WhatIf 是最容易说谎的一条路 —— 加了 -Apply，但 ShouldProcess 把写盘拦了下来。
+    # 中文注释：回执如果还报 applied、还给一个 rollbackCommand，那就是在报告一件没发生过的事，
+    # 中文注释：跟当初那个「VS Code 明明没装却说打开了」是同一类错误，必须钉死。
+    $dryRun = Invoke-DailyTwinProfileScript -Path $ocPath -ApplyChanges -DryRun -DataDir 'D:\DailyTwin\browser-profile'
+    Write-DailyTwinCheck -Name '-Apply -WhatIf 如实报 preview 而不是 applied' -Condition ($null -ne $dryRun -and $dryRun.status -eq 'preview') -Detail "得到：$($dryRun.status)"
+    Write-DailyTwinCheck -Name '-Apply -WhatIf 不给 backupPath' -Condition ($null -ne $dryRun -and $null -eq $dryRun.backupPath) -Detail "得到：$($dryRun.backupPath)"
+    Write-DailyTwinCheck -Name '-Apply -WhatIf 不给 rollbackCommand' -Condition ($null -ne $dryRun -and $null -eq $dryRun.rollbackCommand)
+    Write-DailyTwinCheck -Name '-Apply -WhatIf 确实没生成备份文件' -Condition (@(Get-ChildItem -LiteralPath $ocDir -Filter '*.bak').Count -eq 0)
+    Write-DailyTwinCheck -Name '-Apply -WhatIf 一个字节都没改' -Condition (([System.IO.File]::ReadAllText($ocPath, $utf8NoBom)) -eq $originalText)
 
     $applied = Invoke-DailyTwinProfileScript -Path $ocPath -ApplyChanges -DataDir 'D:\DailyTwin\browser-profile'
     Write-DailyTwinCheck -Name '落盘返回 status=applied' -Condition ($null -ne $applied -and $applied.status -eq 'applied') -Detail "得到：$($applied.status)"
