@@ -4,16 +4,42 @@ coverage/
 .env.*
 !*.example.*
 config/*.local.json
+
+# 私有运行目录（DAILY_TWIN_HOME 指向 D 盘时不会出现在仓库里，
+# 但老版本代码曾把 runtime/ 写在仓库旁边，必须永久忽略）
+runtime/
 data/
 state/
 logs/
 tasks/
+backups/
+receipts/
+screenshots/
+
+# 密钥与凭据
 *.secret.*
 *.token.*
+credentials/
+
+# 数据库
 *.db
 *.sqlite
 *.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+
+# 备份文件（Backup-DailyTwinState.ps1 产生的时间戳备份）
+*.bak
+*.bak.*
+
+# Windows 保留设备名，误建后会变成仓库里删不掉的怪文件
+NUL
+nul
+
+# 截图与图片（可能含个人信息）
 *.png
 *.jpg
 *.jpeg
 *.webp
+*.gif
+*.bmp
