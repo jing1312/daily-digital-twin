@@ -72,6 +72,68 @@ function ConvertFrom-DailyTwinJson {
     }
 }
 
+# 中文注释：ConvertTo-Json 的 -Depth 默认只有 2，超出的层级会被静默写成 "@{a=1}" 这种字符串。
+# 中文注释：写别人的真实配置时这等于把文件写坏，所以先把对象的实际嵌套量出来，再按量给深度。
+function Get-DailyTwinJsonDepth {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][AllowNull()]$InputObject,
+        [int]$Remaining = 100
+    )
+
+    if ($Remaining -le 0) { return 0 }
+    if ($null -eq $InputObject) { return 0 }
+    if ($InputObject -is [string]) { return 0 }
+    if ($InputObject -is [System.ValueType]) { return 0 }
+
+    # 中文注释：数组自己也有 Length/Rank 这些属性，所以必须先判 IEnumerable 再判普通属性袋。
+    # 中文注释：只能用 ArrayList.Add 逐个装 —— 走管道的话数组会被展开，"数组也占一层"就量不出来了。
+    $children = New-Object System.Collections.ArrayList
+    if ($InputObject -is [System.Collections.IDictionary]) {
+        foreach ($key in @($InputObject.Keys)) { $null = $children.Add($InputObject[$key]) }
+    } elseif ($InputObject -is [System.Collections.IEnumerable]) {
+        foreach ($item in $InputObject) { $null = $children.Add($item) }
+    } elseif ($null -ne $InputObject.PSObject -and @($InputObject.PSObject.Properties).Count -gt 0) {
+        foreach ($property in $InputObject.PSObject.Properties) { $null = $children.Add($property.Value) }
+    } else {
+        return 0
+    }
+
+    $deepest = 0
+    foreach ($child in $children) {
+        $childDepth = Get-DailyTwinJsonDepth -InputObject $child -Remaining ($Remaining - 1)
+        if ($childDepth -gt $deepest) { $deepest = $childDepth }
+    }
+    return $deepest + 1
+}
+
+# 中文注释：万一深度还是不够，序列化结果里会留下这些特征串；宁可报错也不能把半截 JSON 落盘。
+function Test-DailyTwinJsonTruncated {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text)
+
+    if ([string]::IsNullOrEmpty($Text)) { return $false }
+    foreach ($marker in @('"@{', '"System.Collections.Hashtable"', '"System.Object[]"', '"System.Management.Automation.PSCustomObject"')) {
+        if ($Text.Contains($marker)) { return $true }
+    }
+    return $false
+}
+
+# 中文注释：量出实际深度后再留两层余量，并且不低于调用方要求的 $Depth，上限 100（ConvertTo-Json 的上限）。
+function Resolve-DailyTwinJsonDepth {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][AllowNull()]$InputObject,
+        [int]$Minimum = 6
+    )
+
+    $effective = (Get-DailyTwinJsonDepth -InputObject $InputObject) + 2
+    if ($effective -lt $Minimum) { $effective = $Minimum }
+    if ($effective -lt 1) { $effective = 1 }
+    if ($effective -gt 100) { $effective = 100 }
+    return $effective
+}
+
 # 中文注释：Node 的 JSON.parse 遇到 BOM 会直接抛错，所以写文件必须显式用无 BOM 的 UTF-8。
 # 中文注释：Out-File -Encoding utf8 在 5.1 上会写 BOM，一律不要用。
 function Write-DailyTwinJsonFile {
@@ -82,7 +144,11 @@ function Write-DailyTwinJsonFile {
         [int]$Depth = 6
     )
 
-    $json = $InputObject | ConvertTo-Json -Depth $Depth
+    $effectiveDepth = Resolve-DailyTwinJsonDepth -InputObject $InputObject -Minimum $Depth
+    $json = $InputObject | ConvertTo-Json -Depth $effectiveDepth
+    if (Test-DailyTwinJsonTruncated -Text $json) {
+        throw "JSON 序列化被截断（已用深度 $effectiveDepth）：$Path。嵌套超过 100 层，或对象里含有不能序列化的类型，已放弃写入。"
+    }
     $directory = Split-Path -Parent $Path
     if ($directory -and -not (Test-Path -LiteralPath $directory)) {
         if ($PSCmdlet.ShouldProcess($directory, '创建目录')) {
@@ -106,7 +172,8 @@ function Write-DailyTwinResult {
         [int]$Depth = 6
     )
 
-    $InputObject | ConvertTo-Json -Depth $Depth -Compress
+    # 中文注释：回执一般很浅，但 changes/blockers 这类数组套对象也能到 4~5 层，同样按实测深度来。
+    $InputObject | ConvertTo-Json -Depth (Resolve-DailyTwinJsonDepth -InputObject $InputObject -Minimum $Depth) -Compress
 }
 
 # 中文注释：pwsh.exe 缺失是本机最常见的开机失败原因之一，注册计划任务前必须先确认。

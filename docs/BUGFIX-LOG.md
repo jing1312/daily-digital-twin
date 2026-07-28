@@ -282,6 +282,39 @@
 
 ---
 
+## B25 `Write-DailyTwinJsonFile` 会静默截断嵌套较深的 JSON
+
+第三处"我自己造出来的洞"，而且是这三处里唯一会**弄坏用户真实数据**的。
+
+`ConvertTo-Json` 的 `-Depth` 默认只有 2，超出的层级不会报错，而是被写成
+`"@{a=1}"` 这样的字符串。`DailyTwin.Common.ps1` 里的 `Write-DailyTwinJsonFile`
+原本固定给 `-Depth 6`——比默认好，但仍然是一个**猜出来的常数**。
+
+它此前只写自己造的浅对象（遥测读数、应用目录），所以一直没暴露。
+`Set-OpenClawBrowserProfile.ps1` 要写的是**用户真实的 `openclaw.json`**：
+只要那份配置里任何一处嵌套超过 6 层，写回去就会把那一段变成字符串，
+而且过程中一声不吭。用户拿到的是一个能解析、但语义已经坏掉的配置。
+
+修法（在公共层修，所有调用方一起受益）：
+
+1. 新增 `Get-DailyTwinJsonDepth` —— 递归量出对象的实际嵌套深度。
+   哈希表、数组、普通属性袋各算一层；字符串和值类型算 0 层。
+   实现上必须用 `ArrayList.Add` 逐个装子节点：走管道的话数组会被 PowerShell 展开，
+   "数组也占一层"就量不出来了（这一条是写完第一版后被自检里的断言抓出来的）。
+2. 新增 `Resolve-DailyTwinJsonDepth` —— 实测深度 +2 的余量，不低于调用方要求的值，
+   上限 100。
+3. 新增 `Test-DailyTwinJsonTruncated` —— 检查序列化结果里有没有
+   `"@{`、`"System.Collections.Hashtable"` 这类截断特征串。
+   `Write-DailyTwinJsonFile` 一旦检出就**抛错，不写盘**。
+4. `Set-OpenClawBrowserProfile.ps1` 落盘后还会把文件读回来核对顶层键、截断特征串、
+   `tools.alsoAllow`、`browser.defaultProfile`，任何一项不对就用备份原地还原。
+
+回归断言（`Test-DailyTwinPlatform.ps1`）：造一份含 8 层嵌套的 `openclaw.json` 样例，
+先用旧的固定 `-Depth 6` 序列化同一个对象、断言**确实**能被截断检测抓到（反向对照），
+再跑一遍完整的 `-Apply`，断言那 8 层原有配置在改完之后仍然一字不差。
+
+---
+
 ## 偏离原计划的地方（7 条，全部有意为之）
 
 | # | 偏离 | 原因 |
