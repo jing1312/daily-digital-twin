@@ -1,15 +1,47 @@
 {
-  "privateHome": "%DAILY_TWIN_HOME%",
-  "database": "data\\runtime.sqlite",
+  "database": "data/runtime.sqlite",
   "maxSlots": 4,
+  "openTaskLimit": 16,
+  "busyTimeoutMs": 5000,
   "resource": {
     "cpuLimitPercent": 55,
     "minAvailableMemoryGb": 8,
     "minDiskFreeGb": 20,
-    "batterySlotLimit": 1
+    "batterySlotLimit": 1,
+    "maxSlots": 4
   },
   "retries": {
     "maxAttempts": 3,
-    "backoffSeconds": [30, 120, 300]
+    "backoffSeconds": [
+      30,
+      120,
+      300
+    ]
+  },
+  "verification": {
+    "ttlSeconds": 600
+  },
+  "scheduler": {
+    "enabled": false,
+    "pollSeconds": 5,
+    "maxParallelWorkers": 2,
+    "maxForegroundTasks": 1
+  },
+  "browser": {
+    "defaultProfile": "openclaw",
+    "signedInProfile": null,
+    "snapshotMode": "efficient",
+    "edgeUserDataDir": null
+  },
+  "storage": {
+    "maxCacheMb": 2048,
+    "maxScreenshotsMb": 2048,
+    "maxLogsMb": 512,
+    "keepFreeDiskGb": 20,
+    "logRotateMb": 32,
+    "logKeepFiles": 7
+  },
+  "execution": {
+    "requireEvidence": true
   }
 }
