@@ -172,8 +172,13 @@ npm run doctor
 
 输出里最值得看的三个字段：
 
-- `telemetrySources` —— `cpu` / `power` 分别来自 `local_sample` / `env` / `file` / `unavailable`。
+- `telemetrySources` —— `cpu` / `power` 的实际来源，取值为 `env` / `file` / `local` / `unavailable`。
+  优先级是 **环境变量 > 新鲜的遥测文件 > Node 本机采样**（`power` 没有本机采样，只有前两种）。
   如果是 `unavailable`，看 `telemetryReasons` 里的原因码。
+  有一个反直觉的情况值得记住：遥测文件**新鲜但 `cpuPercent` 无效**时，原因码是 `missing_cpu_percent`，
+  并且**不会**回退到本机采样 —— 这是刻意的失败关闭，宁可停工也不拿另一个来源掩盖坏掉的传感器。
+  想恢复只有两条路：修好 `Write-DailyTwinTelemetry.ps1` 的写入，或者删掉 `data/telemetry.json`
+  （文件不存在时才会启用本机采样兜底）。临时救急可以设 `DAILY_TWIN_CPU_PERCENT`。
 - `resourcePolicy.acceptsNewActions` —— `false` 就是不接新活，`reason` 会说为什么。
 - `migration` —— 数据库从哪个 schema 版本升到了哪个版本。
 

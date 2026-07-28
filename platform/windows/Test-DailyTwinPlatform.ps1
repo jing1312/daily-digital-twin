@@ -135,6 +135,21 @@ try {
 
     Write-Output '--- Resolve-DailyTwinPwsh ---'
     Write-DailyTwinCheck -Name '不存在的可执行文件返回 null' -Condition ($null -eq (Resolve-DailyTwinPwsh -Preferred 'definitely-not-a-real-exe'))
+    # 中文注释：上面那条断言在 Linux 上是假通过 —— 三个兜底目录的环境变量都为空，
+    # 中文注释：函数根本走不到"猜一份 pwsh"的分支，所以真机上的替身缺陷在沙盒里照样全绿。
+    # 中文注释：这里手工造出兜底目标，让同一条语义在任何系统上都能真的被验证。
+    $savedProgramFiles = $env:ProgramFiles
+    try {
+        $fakeRoot = Join-Path $workRoot 'fake-program-files'
+        $null = New-Item -ItemType Directory -Force -Path $fakeRoot
+        # 中文注释：拼法必须和 Resolve-DailyTwinPwsh 里的一模一样（含反斜杠），否则测的不是同一条路径。
+        $fakePwsh = Join-Path $fakeRoot 'PowerShell\7\pwsh.exe'
+        $null = New-Item -ItemType File -Force -Path $fakePwsh
+        $env:ProgramFiles = $fakeRoot
+        Write-DailyTwinCheck -Name '兜底目录里存在 pwsh 时，也不许拿它冒充别的可执行文件' -Condition ($null -eq (Resolve-DailyTwinPwsh -Preferred 'definitely-not-a-real-exe')) -Detail "兜底目标：$fakePwsh"
+    } finally {
+        $env:ProgramFiles = $savedProgramFiles
+    }
     $foundPwsh = Resolve-DailyTwinPwsh -Preferred 'pwsh'
     if ($null -ne $foundPwsh) {
         Write-DailyTwinCheck -Name '能在 PATH 上找到 pwsh' -Condition ($true) -Detail $foundPwsh
