@@ -55,6 +55,35 @@ export function describeProfile(name) {
   return BROWSER_PROFILES[name] ?? null;
 }
 
+// 中文注释：从 URL 里取出主机名。取不到就返回 null —— 宁可不判断，也不要拿半截字符串去匹配。
+export function hostnameOf(url) {
+  if (typeof url !== 'string' || url.trim().length === 0) return null;
+  try {
+    const hostname = new URL(url).hostname.toLowerCase();
+    return hostname.length > 0 ? hostname : null;
+  } catch {
+    return null;
+  }
+}
+
+// 中文注释：登记表的匹配规则只有两条，刻意保持可预测：
+// 中文注释：  'example.com'  只匹配 example.com 本身；
+// 中文注释：  '.example.com' 匹配 example.com 及其任意子域名（沿用 cookie 域的写法）。
+export function isHostLoggedIn(hostname, entries = []) {
+  if (!hostname || !Array.isArray(entries)) return false;
+  const target = hostname.toLowerCase();
+  return entries.some((raw) => {
+    if (typeof raw !== 'string') return false;
+    const entry = raw.trim().toLowerCase();
+    if (entry.length === 0) return false;
+    if (entry.startsWith('.')) {
+      const bare = entry.slice(1);
+      return bare.length > 0 && (target === bare || target.endsWith(entry));
+    }
+    return target === entry;
+  });
+}
+
 // 中文注释：决定一次浏览器动作应该走哪个 profile，并把所有已知风险以 warnings 显式返回。
 export function routeBrowserAction({
   url = null,
@@ -86,8 +115,21 @@ export function routeBrowserAction({
     };
   }
 
+  // 中文注释：受管浏览器（路线 C）不共享日常浏览器的登录态，每个站点要单独登录一次。
+  // 中文注释：这里只发警告、不拒绝执行 —— managedLoggedInHosts 是人手维护的声明，不是观测结果，
+  // 中文注释：拿它当拒绝依据的话，一份过期的清单就会挡住本来能跑的任务。
+  // 中文注释：真正防"没登录却谎报成功"的是 execution-verifier 的证据要求，不是这张表。
+  let signedInHostKnown = null;
   if (requiresSignedInSession && !profile.usesExistingLogin) {
-    warnings.push(`profile ${profileName} 不会带上你日常浏览器的登录态，站点需要在受管浏览器里单独登录。`);
+    const hostname = hostnameOf(url);
+    signedInHostKnown = hostname === null ? null : isHostLoggedIn(hostname, browserConfig.managedLoggedInHosts ?? []);
+    if (signedInHostKnown === true) {
+      warnings.push(`${hostname} 已登记为在受管浏览器里登录过；若仍撞上登录墙，说明登录态已过期，需要重新登录一次。`);
+    } else if (signedInHostKnown === false) {
+      warnings.push(`${hostname} 不在 browser.managedLoggedInHosts 里，受管浏览器大概率没有它的登录态，任务会停在登录页。`);
+    } else {
+      warnings.push(`profile ${profileName} 不会带上你日常浏览器的登录态，站点需要在受管浏览器里单独登录。`);
+    }
   }
   if (preferredBrowser && profile.browser !== preferredBrowser) {
     warnings.push(`你要求使用 ${preferredBrowser}，但 profile ${profileName} 实际驱动 ${profile.browser}。`);
@@ -118,6 +160,7 @@ export function routeBrowserAction({
     browser: profile.browser,
     snapshotMode: browserConfig.snapshotMode ?? 'efficient',
     url,
+    signedInHostKnown,
     warnings,
     cliArgs: ['--browser-profile', profileName]
   };

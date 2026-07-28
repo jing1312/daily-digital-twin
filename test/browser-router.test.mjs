@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { routeBrowserAction, describeProfile, BROWSER_PROFILES } from '../src/core/browser-router.mjs';
+import {
+  routeBrowserAction,
+  describeProfile,
+  hostnameOf,
+  isHostLoggedIn,
+  BROWSER_PROFILES
+} from '../src/core/browser-router.mjs';
 import { DEFAULT_CONFIG } from '../src/core/config.mjs';
 
 test('B15：浏览器路由已有实现，不再只是一份设计文档', () => {
@@ -96,4 +102,65 @@ test('快照模式默认取 efficient 以压低上下文开销', () => {
     routeBrowserAction({ config: { browser: { defaultProfile: 'openclaw', snapshotMode: 'full' } } }).snapshotMode,
     'full'
   );
+});
+
+// 中文注释：以下是路线 C（受管隔离浏览器）落地后补的测试。
+// 中文注释：路线 C 的唯一代价是"每个站点要单独登录一次"，而这件事没有任何自动记录，
+// 中文注释：所以要在路由阶段就把"这个站点还没登录过"讲清楚，而不是让任务停在登录页再去猜原因。
+
+test('受管浏览器上，未登记的站点要被明确警告', () => {
+  const route = routeBrowserAction({
+    url: 'https://mail.example.com/inbox',
+    requiresSignedInSession: true,
+    config: { browser: { defaultProfile: 'openclaw', managedLoggedInHosts: ['other.example.com'] } }
+  });
+  assert.equal(route.allowed, true, '只警告，不拒绝：登记表是人手维护的声明，不是观测结果');
+  assert.equal(route.signedInHostKnown, false);
+  assert.ok(route.warnings.some((text) => text.includes('mail.example.com') && /登录墙|登录页/.test(text)));
+});
+
+test('已登记的站点不再报"没登录"，但要提醒登录态可能过期', () => {
+  const route = routeBrowserAction({
+    url: 'https://mail.example.com/inbox',
+    requiresSignedInSession: true,
+    config: { browser: { defaultProfile: 'openclaw', managedLoggedInHosts: ['MAIL.EXAMPLE.COM'] } }
+  });
+  assert.equal(route.signedInHostKnown, true, '匹配必须忽略大小写');
+  assert.ok(route.warnings.some((text) => /过期/.test(text)));
+  assert.ok(
+    !route.warnings.some((text) => text.includes('不在 browser.managedLoggedInHosts')),
+    '已登记的站点不该再收到"未登记"那条警告'
+  );
+});
+
+test('前导点号的条目匹配子域名，不带点号的只匹配自身', () => {
+  assert.equal(isHostLoggedIn('open.feishu.cn', ['.feishu.cn']), true);
+  assert.equal(isHostLoggedIn('feishu.cn', ['.feishu.cn']), true, '带点条目也要覆盖裸域名本身');
+  assert.equal(isHostLoggedIn('open.feishu.cn', ['feishu.cn']), false, '不带点号时不得放大匹配范围');
+  assert.equal(isHostLoggedIn('evilfeishu.cn', ['.feishu.cn']), false, '后缀匹配不能跨过点号边界');
+  assert.equal(isHostLoggedIn('feishu.cn', []), false);
+  assert.equal(isHostLoggedIn(null, ['.feishu.cn']), false);
+});
+
+test('URL 取不出主机名时退回通用提示，不做半截匹配', () => {
+  assert.equal(hostnameOf('不是一个 URL'), null);
+  assert.equal(hostnameOf(''), null);
+  assert.equal(hostnameOf('https://Example.COM/x'), 'example.com');
+  const route = routeBrowserAction({
+    requiresSignedInSession: true,
+    config: { browser: { defaultProfile: 'openclaw', managedLoggedInHosts: ['example.com'] } }
+  });
+  assert.equal(route.signedInHostKnown, null, '没有 URL 就不能声称知道登录状态');
+  assert.ok(route.warnings.some((text) => /单独登录/.test(text)));
+});
+
+test('使用真实登录态的 profile 不需要登记表', () => {
+  const route = routeBrowserAction({
+    url: 'https://mail.example.com/inbox',
+    requiresSignedInSession: true,
+    config: { browser: { defaultProfile: 'openclaw', signedInProfile: 'chrome', managedLoggedInHosts: [] } }
+  });
+  assert.equal(route.profile, 'chrome');
+  assert.equal(route.signedInHostKnown, null);
+  assert.ok(!route.warnings.some((text) => /managedLoggedInHosts/.test(text)));
 });

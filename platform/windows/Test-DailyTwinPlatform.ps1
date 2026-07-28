@@ -227,6 +227,105 @@ try {
         try { Get-DailyTwinAppEntry -Catalog $duplicateCatalog -Name 'shared' | Out-Null } catch { $threw = $true }
         Write-DailyTwinCheck -Name '别名重复时抛错而不是随便选一个' -Condition $threw
     }
+
+    Write-Output '--- Set-OpenClawBrowserProfile.ps1（路线 C：改的是别人的真实配置，容不得半点马虎）---'
+    $script:openClawScript = Join-Path $PSScriptRoot 'Set-OpenClawBrowserProfile.ps1'
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+
+    function Invoke-DailyTwinProfileScript {
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory = $true)][string]$Path,
+            [switch]$ApplyChanges,
+            [string]$DataDir
+        )
+        $parameters = @{ ConfigPath = $Path; WarningAction = 'SilentlyContinue' }
+        if ($ApplyChanges) { $parameters['Apply'] = $true }
+        if (-not [string]::IsNullOrWhiteSpace($DataDir)) { $parameters['ManagedUserDataDir'] = $DataDir }
+        $captured = @(& $script:openClawScript @parameters)
+        $line = @($captured | Where-Object { $_ -is [string] -and $_.StartsWith('{') }) | Select-Object -Last 1
+        if ($null -eq $line) { return $null }
+        return ($line | ConvertFrom-Json)
+    }
+
+    # 中文注释：这份样例照着真机 openclaw.json 的形状写，但路径一律用中性目录，不能带真实个人路径。
+    # 中文注释：deep 那一段是深度回归用的 —— 8 层嵌套在旧的固定 -Depth 6 下会被写成 "@{...}"。
+    $ocDir = Join-Path $workRoot 'openclaw'
+    $null = New-Item -ItemType Directory -Force -Path $ocDir
+    $baseConfigText = '{"workspace":"D:\\DailyTwin\\workspace","maxConcurrent":2,"model":"openai/gpt-5.6-sol","timezone":"Asia/Shanghai","gateway":{"mode":"local","port":18789,"bind":"loopback","auth":{"mode":"token"}},"session":{"dmScope":"per-channel-peer"},"tools":{"profile":"coding","fs":{"workspaceOnly":true},"exec":{"mode":"auto","strictInlineEval":true},"elevated":{"enabled":false}},"deep":{"l2":{"l3":{"l4":{"l5":{"l6":{"l7":"keep"}}}}}}}'
+
+    $ocPath = Join-Path $ocDir 'openclaw.json'
+    [System.IO.File]::WriteAllText($ocPath, $baseConfigText, $utf8NoBom)
+    $originalText = [System.IO.File]::ReadAllText($ocPath, $utf8NoBom)
+
+    $preview = Invoke-DailyTwinProfileScript -Path $ocPath
+    Write-DailyTwinCheck -Name '预览返回 status=preview' -Condition ($null -ne $preview -and $preview.status -eq 'preview') -Detail "得到：$($preview.status)"
+    Write-DailyTwinCheck -Name '预览列出了待改项' -Condition ($null -ne $preview -and @($preview.changes).Count -gt 0)
+    Write-DailyTwinCheck -Name '预览一个字节都没改' -Condition (([System.IO.File]::ReadAllText($ocPath, $utf8NoBom)) -eq $originalText)
+    Write-DailyTwinCheck -Name '预览不生成备份' -Condition (@(Get-ChildItem -LiteralPath $ocDir -Filter '*.bak').Count -eq 0)
+
+    $applied = Invoke-DailyTwinProfileScript -Path $ocPath -ApplyChanges -DataDir 'D:\DailyTwin\browser-profile'
+    Write-DailyTwinCheck -Name '落盘返回 status=applied' -Condition ($null -ne $applied -and $applied.status -eq 'applied') -Detail "得到：$($applied.status)"
+    $backupFiles = @(Get-ChildItem -LiteralPath $ocDir -Filter '*.bak')
+    Write-DailyTwinCheck -Name '落盘前先生成了备份' -Condition ($backupFiles.Count -eq 1) -Detail "找到 $($backupFiles.Count) 份"
+    if ($backupFiles.Count -eq 1) {
+        Write-DailyTwinCheck -Name '备份与原文件逐字节一致' -Condition (([System.IO.File]::ReadAllText($backupFiles[0].FullName, $utf8NoBom)) -eq $originalText)
+    }
+    Write-DailyTwinCheck -Name '回执里给出了可直接粘贴的回滚命令' -Condition ($null -ne $applied -and -not [string]::IsNullOrWhiteSpace($applied.rollbackCommand)) -Detail $applied.rollbackCommand
+
+    $writtenText = [System.IO.File]::ReadAllText($ocPath, $utf8NoBom)
+    $writtenBytes = [System.IO.File]::ReadAllBytes($ocPath)
+    $writtenHasBom = ($writtenBytes.Length -ge 3 -and $writtenBytes[0] -eq 0xEF -and $writtenBytes[1] -eq 0xBB -and $writtenBytes[2] -eq 0xBF)
+    Write-DailyTwinCheck -Name '写回去的配置没有 BOM' -Condition (-not $writtenHasBom)
+    Write-DailyTwinCheck -Name '写回去的配置没有截断特征串' -Condition (-not (Test-DailyTwinJsonTruncated -Text $writtenText))
+
+    $afterConfig = ConvertFrom-DailyTwinJson -Path $ocPath
+    Write-DailyTwinCheck -Name 'tools.alsoAllow 补上了 browser' -Condition (@($afterConfig.tools.alsoAllow) -contains 'browser')
+    Write-DailyTwinCheck -Name 'browser.defaultProfile = openclaw' -Condition ($afterConfig.browser.defaultProfile -eq 'openclaw')
+    Write-DailyTwinCheck -Name 'browser.snapshotDefaults.mode = efficient' -Condition ($afterConfig.browser.snapshotDefaults.mode -eq 'efficient')
+    Write-DailyTwinCheck -Name 'browser.userDataDir 指向 D 盘' -Condition ($afterConfig.browser.userDataDir -eq 'D:\DailyTwin\browser-profile')
+    Write-DailyTwinCheck -Name '原有的浅层配置没被动过' -Condition ($afterConfig.tools.profile -eq 'coding' -and $afterConfig.gateway.port -eq 18789)
+    Write-DailyTwinCheck -Name '原有的三层配置没被动过' -Condition ($afterConfig.tools.exec.strictInlineEval -eq $true -and $afterConfig.gateway.auth.mode -eq 'token')
+    # 中文注释：这一条就是把"改配置反而写坏配置"钉死的回归断言。
+    Write-DailyTwinCheck -Name '八层嵌套的原有配置完好无损（深度回归）' -Condition ($afterConfig.deep.l2.l3.l4.l5.l6.l7 -eq 'keep') -Detail $writtenText
+
+    $again = Invoke-DailyTwinProfileScript -Path $ocPath -ApplyChanges -DataDir 'D:\DailyTwin\browser-profile'
+    Write-DailyTwinCheck -Name '重复执行报 already_ok（幂等）' -Condition ($null -ne $again -and $again.status -eq 'already_ok') -Detail "得到：$($again.status)"
+    Write-DailyTwinCheck -Name '幂等执行不再生成新备份' -Condition (@(Get-ChildItem -LiteralPath $ocDir -Filter '*.bak').Count -eq 1)
+
+    # 中文注释：闸门一 —— allow 是替换语义，alsoAllow 是追加语义，同一作用域不能共存，只能由人决定。
+    $allowPath = Join-Path $ocDir 'with-allow.json'
+    [System.IO.File]::WriteAllText($allowPath, '{"tools":{"profile":"coding","allow":["fs","exec"]}}', $utf8NoBom)
+    $allowBefore = [System.IO.File]::ReadAllText($allowPath, $utf8NoBom)
+    $allowResult = Invoke-DailyTwinProfileScript -Path $allowPath
+    Write-DailyTwinCheck -Name 'tools.allow 存在时判定为 blocked' -Condition ($null -ne $allowResult -and $allowResult.status -eq 'blocked') -Detail "得到：$($allowResult.status)"
+    Write-DailyTwinCheck -Name '拦截原因是 allow/alsoAllow 冲突' -Condition ($null -ne $allowResult -and @($allowResult.blockers | ForEach-Object { $_.code }) -contains 'allow_and_alsoallow_conflict')
+    $threw = $false
+    try { Invoke-DailyTwinProfileScript -Path $allowPath -ApplyChanges | Out-Null } catch { $threw = $true }
+    Write-DailyTwinCheck -Name '带 -Apply 也要抛错拒绝' -Condition $threw
+    Write-DailyTwinCheck -Name '被拦下时文件原封不动' -Condition (([System.IO.File]::ReadAllText($allowPath, $utf8NoBom)) -eq $allowBefore)
+
+    # 中文注释：闸门二 —— plugins.allow 在工具策略之前就决定插件加不加载。
+    $pluginPath = Join-Path $ocDir 'with-plugin-allow.json'
+    [System.IO.File]::WriteAllText($pluginPath, '{"tools":{"profile":"coding"},"plugins":{"allow":["memory","search"]}}', $utf8NoBom)
+    $pluginBefore = [System.IO.File]::ReadAllText($pluginPath, $utf8NoBom)
+    $pluginResult = Invoke-DailyTwinProfileScript -Path $pluginPath
+    Write-DailyTwinCheck -Name 'plugins.allow 白名单缺 browser 时判定为 blocked' -Condition ($null -ne $pluginResult -and $pluginResult.status -eq 'blocked') -Detail "得到：$($pluginResult.status)"
+    Write-DailyTwinCheck -Name '拦截原因是插件白名单不含 browser' -Condition ($null -ne $pluginResult -and @($pluginResult.blockers | ForEach-Object { $_.code }) -contains 'plugin_allowlist_excludes_browser')
+    $threw = $false
+    try { Invoke-DailyTwinProfileScript -Path $pluginPath -ApplyChanges | Out-Null } catch { $threw = $true }
+    Write-DailyTwinCheck -Name '插件白名单被拦时同样拒绝落盘' -Condition ($threw -and ([System.IO.File]::ReadAllText($pluginPath, $utf8NoBom)) -eq $pluginBefore)
+
+    # 中文注释：plugins.allow 里已经有 browser 就不该拦。
+    $pluginOkPath = Join-Path $ocDir 'plugin-allow-ok.json'
+    [System.IO.File]::WriteAllText($pluginOkPath, '{"tools":{"profile":"coding"},"plugins":{"allow":["memory","browser"]}}', $utf8NoBom)
+    $pluginOk = Invoke-DailyTwinProfileScript -Path $pluginOkPath
+    Write-DailyTwinCheck -Name '插件白名单已含 browser 时不拦' -Condition ($null -ne $pluginOk -and $pluginOk.status -eq 'preview') -Detail "得到：$($pluginOk.status)"
+
+    $missingResult = $null
+    $threw = $false
+    try { $missingResult = Invoke-DailyTwinProfileScript -Path (Join-Path $ocDir 'nope.json') } catch { $threw = $true }
+    Write-DailyTwinCheck -Name '配置文件不存在时抛错而不是凭空造一个' -Condition ($threw -and $null -eq $missingResult)
 } finally {
     $env:DAILY_TWIN_HOME = $originalHome
     Remove-Item -LiteralPath $workRoot -Recurse -Force -ErrorAction SilentlyContinue

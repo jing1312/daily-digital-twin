@@ -106,6 +106,79 @@ npm run runtime -- init
 
 ---
 
+## 3b. 切到路线 C：受管隔离浏览器（改 `openclaw.json`）
+
+前提：第 3 步的备份已经做完。这一步会真的改你机器上的 `openclaw.json`。
+
+为什么"让替身用 Edge"一直不成功、以及为什么选路线 C，完整推导在
+`docs/BROWSER-PROFILES.md`。这里只讲怎么做。
+
+```powershell
+# 1) 只预览。默认不写盘，看清楚要改哪几项、为什么改
+.\platform\windows\Set-OpenClawBrowserProfile.ps1 -ConfigPath <openclaw.json 的完整路径>
+
+# 2) 确认无误后落盘。会先生成时间戳 .bak，并打印一行回滚命令
+.\platform\windows\Set-OpenClawBrowserProfile.ps1 -ConfigPath <openclaw.json 的完整路径> `
+    -ManagedUserDataDir 'D:\DailyTwin\browser-profile' -Apply
+```
+
+参数：
+
+- `-ConfigPath`（必填）：`openclaw.json` 的完整路径。
+- `-ManagedUserDataDir`：受管浏览器的用户数据目录。**放 D 盘**，符合本项目的磁盘策略；
+  留空则交给 OpenClaw 用它自己的默认位置。
+- `-SnapshotMode`：`efficient`（默认，省 token）或 `full`。
+- `-Apply`：不加这个开关，脚本绝不写任何文件。
+
+回执里的 `status` 有四种：`preview`（只预览）、`applied`（已落盘）、`already_ok`（本来就对，
+重复跑不会重复改）、`blocked`（有需要你自己决定的冲突，见下）。
+
+两种会被拒绝自动处理的情况：
+
+- `allow_and_alsoallow_conflict`：`tools.allow` 已存在。它和 `tools.alsoAllow` 是替换 vs
+  追加两种语义，同一作用域不能共存。删掉 `allow` 可能顺手关掉别的工具，只能你自己定。
+- `plugin_allowlist_excludes_browser`：`plugins.allow` 是非空白名单但不含 `browser`。
+  插件加载发生在工具策略之前，这道闸不打开，后面配得再对也没用。
+
+安全网（三层，都在脚本里）：
+
+1. 落盘前先 `Copy-Item` 出 `openclaw.json.<时间戳>.bak`，备份没生成就不写。
+2. 序列化时按对象**实际嵌套深度**给 `ConvertTo-Json -Depth`。
+   `ConvertTo-Json` 默认只有 2 层，本项目公共函数原本固定给 6 层——一旦你的配置嵌套更深，
+   超出的层会被静默写成 `"@{a=1}"` 这种字符串，等于把配置写坏。现在会先量再写，量不下就报错。
+3. 写完立刻读回来逐项核对：顶层键没丢、文件里没有截断特征串、`tools.alsoAllow` 含 `browser`、
+   `browser.defaultProfile` 是 `openclaw`。任何一项不对，就用备份原地还原并抛错。
+
+落盘之后：
+
+```powershell
+# 重启网关让新配置生效，然后确认 browser 工具这次真的存在
+openclaw browser status
+```
+
+然后按 `docs/BROWSER-PROFILES.md` 的"一次性登录清单"，把常用站点在受管浏览器里各登录一次，
+并把域名写进私有目录 `config/runtime.json` 的 `browser.managedLoggedInHosts`：
+
+```jsonc
+{
+  "browser": {
+    "managedLoggedInHosts": [".feishu.cn", "www.ncbi.nlm.nih.gov"]
+  }
+}
+```
+
+`".feishu.cn"` 这种点开头的写法匹配主域和它的全部子域；不带点则只匹配那一个主机名。
+这份列表**只影响提示文案，不会拦下任何任务**——它是人手工声明的，不是程序观测到的，
+让一份可能过期的清单决定放不放行是错的。
+
+出问题就回滚（回执里那行命令可以直接粘贴）：
+
+```powershell
+Copy-Item -LiteralPath '<openclaw.json>.<时间戳>.bak' -Destination '<openclaw.json>' -Force
+```
+
+---
+
 ## 4. 遥测：让替身知道机器忙不忙
 
 `os.cpus()` 在部分环境下返回全零时间片，导致 CPU 占用取不到值。资源策略是
@@ -312,6 +385,10 @@ npm run selftest:ps
 
 - [ ] 第 1 步：环境变量真的写进用户级，重开窗口能读到。
 - [ ] 第 3 步：备份产物完整（配置 + sqlite + 全部 jsonl），且源目录未被改动。
+- [ ] 第 3b 步：预览输出与真实 `openclaw.json` 对得上；`-Apply` 后 `.bak` 已生成，
+      且 OpenClaw 能正常读起新配置；`openclaw browser status` 返回正常。
+- [ ] 第 3b 步：受管浏览器里登录一次后**重启网关**，同一站点不再要求登录
+      （这一条才真正证明登录态持久化，只能在真机上验证）。
 - [ ] 第 4 步：`telemetry.json` 里 `cpuPercent` 和 `onAcPower` 都不是 `null`。
 - [ ] 第 5 步：`Invoke-DailyTwinDoctor.ps1` 全绿；`npm run doctor` 的
       `resourcePolicy.acceptsNewActions` 为 `true`。

@@ -38,7 +38,12 @@ export const DEFAULT_CONFIG = {
     defaultProfile: 'openclaw',
     signedInProfile: null,
     snapshotMode: 'efficient',
-    edgeUserDataDir: null
+    edgeUserDataDir: null,
+    // 中文注释：路线 C 的代价是"每个站点要在受管浏览器里单独登录一次"，而这件事没有任何自动记录。
+    // 中文注释：把已登录过的域名登记在这里，路由时就能提前警告"这个站点还没登录过"，
+    // 中文注释：而不是等任务撞上登录墙、再被当成执行失败去排查。
+    // 中文注释：写法：'example.com' 精确匹配；'.example.com' 同时匹配其子域名。
+    managedLoggedInHosts: []
   },
   storage: {
     maxCacheMb: 2048,
@@ -120,6 +125,18 @@ export function validateConfig(config) {
 
   if (typeof config.browser?.defaultProfile !== 'string' || config.browser.defaultProfile.trim().length === 0) {
     problems.push('browser.defaultProfile 必须是 profile 名称字符串');
+  }
+
+  // 中文注释：snapshotMode 会被原样传给 Invoke-DailyTwinBrowser.ps1 的 ValidateSet，
+  // 中文注释：在这里拦下拼写错误，好过等到 PowerShell 侧抛一个看不懂的参数校验错误。
+  if (!['efficient', 'full'].includes(config.browser?.snapshotMode)) {
+    problems.push("browser.snapshotMode 只能是 'efficient' 或 'full'");
+  }
+
+  if (!Array.isArray(config.browser?.managedLoggedInHosts)) {
+    problems.push('browser.managedLoggedInHosts 必须是域名数组');
+  } else if (config.browser.managedLoggedInHosts.some((host) => typeof host !== 'string' || host.trim().length === 0)) {
+    problems.push('browser.managedLoggedInHosts 的每一项都必须是非空域名字符串');
   }
 
   if (problems.length > 0) throw new ConfigError(problems);

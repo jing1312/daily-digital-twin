@@ -16,6 +16,11 @@
 本项目当前默认走 **受管隔离浏览器（`openclaw` profile）**，代价是常用网站要在替身专用浏览器里
 单独登录一次。这是唯一"文档覆盖 + 无人值守 + 不需要你坐在电脑前"的组合。
 
+> **2026-07-28 决定：正式采用路线 C（受管隔离浏览器）。**
+> 配套落地物：`platform/windows/Set-OpenClawBrowserProfile.ps1`（改 `openclaw.json`，默认只预览）、
+> `browser.managedLoggedInHosts`（登记哪些站点已经在受管浏览器里登录过）。
+> 路线 B 和路线 A 的说明保留，作为将来切换时的依据，但**当前不是默认**。
+
 ## 三个原因，按发生顺序
 
 ### 原因一：工具被 profile 过滤掉了
@@ -96,7 +101,7 @@
 
 ## 三条可选路线
 
-### 路线 C：受管隔离浏览器（推荐，现在就能用）
+### 路线 C：受管隔离浏览器（**已采用**）
 
 `browser.defaultProfile: "openclaw"`。替身用自己的一份持久化用户数据目录，与你日常浏览器
 完全隔离。
@@ -105,6 +110,43 @@
   用户数据目录。
 - 代价：常用网站需要**一次性**在这个浏览器里手动登录。之后登录态会持久保存。
 - 适用：本项目绝大多数网页任务。
+
+#### 怎么落地
+
+不要手改 `openclaw.json`。用脚本，它默认只预览、不写盘：
+
+```powershell
+# 第一步：只看要改什么，一个字节都不会写
+.\platform\windows\Set-OpenClawBrowserProfile.ps1 -ConfigPath 'D:\...\openclaw.json'
+
+# 第二步：确认无误后再落盘（会先生成时间戳 .bak，并打印一行回滚命令）
+.\platform\windows\Set-OpenClawBrowserProfile.ps1 -ConfigPath 'D:\...\openclaw.json' `
+    -ManagedUserDataDir 'D:\DailyTwin\browser-profile' -Apply
+```
+
+脚本会做三件事，对应上文三个原因：`tools.alsoAllow` 补 `browser`、检查 `plugins.allow`、
+建根级 `browser` 配置块（`defaultProfile` / `snapshotDefaults.mode` / `userDataDir`）。
+
+有两种情况它会**拒绝自动改**，只报告让你自己决定：
+
+| 代码 | 情况 | 为什么不能代劳 |
+| --- | --- | --- |
+| `allow_and_alsoallow_conflict` | `tools.allow` 已存在 | `allow` 是替换语义、`alsoAllow` 是追加语义，同一作用域不能共存。删掉 `allow` 可能顺手关掉别的工具。 |
+| `plugin_allowlist_excludes_browser` | `plugins.allow` 是非空白名单但不含 `browser` | 插件加载发生在工具策略之前，改白名单等于改插件加载策略。 |
+
+落盘之后脚本会立刻把文件读回来逐项核对（顶层键没丢、没有 JSON 截断特征串、`alsoAllow` 里有
+`browser`、`defaultProfile` 是 `openclaw`），任何一项不对就用备份原地还原并报错。
+
+#### 一次性登录清单
+
+改完配置后需要做一次，而且只做一次：
+
+1. 重启 OpenClaw 网关。
+2. `openclaw browser status` —— 确认 `browser` 工具这次真的存在。
+3. 让替身打开一个需要登录的站点，在弹出的受管浏览器窗口里手动登录。
+4. 逐个站点重复第 3 步（飞书、学校系统、文献库……）。
+5. 把登录过的域名写进私有目录 `config/runtime.json` 的 `browser.managedLoggedInHosts`。
+6. 重启一次网关，再打开同一个站点，确认**不再要求登录**——这一步才算真的验证了登录态持久化。
 
 ### 路线 B：Chrome 扩展模式（值得试，但 Edge 侧未验证）
 
@@ -157,7 +199,8 @@
     "defaultProfile": "openclaw",
     "signedInProfile": null,
     "snapshotMode": "efficient",
-    "edgeUserDataDir": null
+    "edgeUserDataDir": null,
+    "managedLoggedInHosts": [".feishu.cn", "www.ncbi.nlm.nih.gov"]
   }
 }
 ```
@@ -166,6 +209,24 @@
 - `signedInProfile`：只有当任务显式声明"需要已登录会话"时才会用到。留空则退回默认 profile，
   并附一条警告。
 - `edgeUserDataDir`：只有 `edge-existing-session` 需要。
+- `managedLoggedInHosts`：路线 C 的一次性登录成本记在这里。两种写法：
+  - `"example.com"` —— 只匹配这一个主机名（大小写不敏感）。
+  - `".example.com"` —— 匹配 `example.com` 本身以及它的任意子域（沿用 Cookie 域的写法）。
+    注意 `.feishu.cn` **不会**匹配 `evilfeishu.cn`，不存在跨点位的后缀误伤。
+
+关于 `managedLoggedInHosts` 有一条要说清楚的设计取舍：**它只影响警告，永远不会拦下任务。**
+
+这份列表是"人手工声明的"，不是"程序观测到的"——登录态可能过期，域名可能漏记。
+如果让它决定放不放行，一份过期的列表就会把本来能做的事全挡住，而且挡得毫无道理。
+所以路由的行为是：
+
+| 情况 | 行为 |
+| --- | --- |
+| 任务要求已登录会话，域名**在**列表里 | 放行，附一条"登录态可能已过期，撞到登录墙就重登一次"的提醒 |
+| 任务要求已登录会话，域名**不在**列表里 | 放行，附一条"受管浏览器大概率没有它的登录态，会停在登录页" |
+| 任务要求已登录会话，但 URL 解析不出主机名 | 放行，附原来那条通用提醒 |
+
+真正防"其实没登录却报成功"的那道闸，是 `execution-verifier` 的证据要求，不是这份列表。
 
 命令行侧：`platform/windows/Invoke-DailyTwinBrowser.ps1` 的参数名是 **`-BrowserProfileName`**，
 不叫 `-Profile`——`$PROFILE` 是 PowerShell 自动变量，占用它会踩到与 B18 同类的坑。
@@ -186,7 +247,14 @@
 
 沙箱里没有 Windows、没有 Chrome/Edge、也没有 OpenClaw 网关，所以下面这些只能由你在本机确认：
 
+- [ ] `Set-OpenClawBrowserProfile.ps1` 的预览输出与你真实的 `openclaw.json` 对得上。
+- [ ] `-Apply` 之后 `.bak` 确实生成，且新配置能被 OpenClaw 正常读起来。
 - [ ] `tools.alsoAllow: ["browser"]` 后，`openclaw browser status` 能正常返回。
 - [ ] 受管浏览器（路线 C）里一次性登录后，重启网关登录态仍然保留。
 - [ ] 路线 B 的扩展在 Chrome 上配对成功，徽标变 ON。
 - [ ] 路线 B 的扩展能否在 Edge 上加载并配对（这一条是本项目目前**唯一**的未知项）。
+
+沙箱里能证明的部分只有：脚本在 PowerShell 7.6.4 上语法通过、PSScriptAnalyzer 无
+Error/Warning、预览不写盘、落盘先备份且备份逐字节一致、两条闸门都会拒绝落盘、重复执行幂等、
+八层嵌套的原有配置不会被 `ConvertTo-Json` 截断。**Windows PowerShell 5.1 上的行为由 CI 的
+`windows-latest` 任务判定，不由沙箱判定。**
