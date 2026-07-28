@@ -1,38 +1,28 @@
-import { DatabaseSync } from 'node:sqlite';
+import { migrate } from './schema.mjs';
 
 // 中文注释：记录每次模型调用的用量，但不保存提示词和任务正文。
+// 中文注释：建表已并入 schema.mjs 的版本化迁移，这里只保留兼容入口（修 B16b 的前置件）。
 export function ensureTokenLedger(db) {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS token_ledger (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      task_id INTEGER NOT NULL,
-      worker_id TEXT NOT NULL,
-      model TEXT NOT NULL,
-      input_tokens INTEGER NOT NULL DEFAULT 0,
-      output_tokens INTEGER NOT NULL DEFAULT 0,
-      cache_hit INTEGER NOT NULL DEFAULT 0,
-      latency_ms INTEGER NOT NULL DEFAULT 0,
-      estimated_cost REAL,
-      recorded_at TEXT NOT NULL
-    )
-  `);
+  return migrate(db);
 }
 
-// 中文注释：写入结构化 Token 账本，供成本和延迟分析使用。
+// 中文注释：写入结构化 Token 账本，供成本、缓存命中率和延迟分析使用。
+// 中文注释：推荐直接用 TaskStore#recordTokenUsage —— 它已接入任务收尾流程。
 export function recordTokenUsage(db, usage) {
   ensureTokenLedger(db);
   db.prepare(`
     INSERT INTO token_ledger
-      (task_id, worker_id, model, input_tokens, output_tokens, cache_hit, latency_ms, estimated_cost, recorded_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (task_id, worker_id, model, input_tokens, cached_tokens, output_tokens, cache_hit, latency_ms, estimated_cost, recorded_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     usage.taskId,
-    usage.workerId,
-    usage.model,
-    usage.inputTokens ?? 0,
-    usage.outputTokens ?? 0,
+    String(usage.workerId ?? 'local'),
+    String(usage.model ?? 'unknown'),
+    Number(usage.inputTokens ?? 0),
+    Number(usage.cachedTokens ?? 0),
+    Number(usage.outputTokens ?? 0),
     usage.cacheHit ? 1 : 0,
-    usage.latencyMs ?? 0,
+    Number(usage.latencyMs ?? 0),
     usage.estimatedCost ?? null,
     new Date().toISOString()
   );
