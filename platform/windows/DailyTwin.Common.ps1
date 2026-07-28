@@ -114,6 +114,13 @@ function Resolve-DailyTwinPwsh {
     [CmdletBinding()]
     param([string]$Preferred = 'pwsh.exe')
 
+    # 中文注释：调用方若明确指定了非标准名称，找不到时必须失败，不得猜测成另一份 pwsh。
+    if (-not [string]::IsNullOrWhiteSpace($Preferred) -and
+        [System.IO.Path]::GetFileName($Preferred) -notin @('pwsh', 'pwsh.exe') -and
+        -not [System.IO.Path]::IsPathRooted($Preferred)) {
+        return $null
+    }
+
     $command = Get-Command -Name $Preferred -CommandType Application -ErrorAction SilentlyContinue |
         Select-Object -First 1
     if ($command) { return $command.Source }

@@ -111,9 +111,9 @@ export function toFiniteNumber(value) {
   return null;
 }
 
-// 中文注释：CPU 优先级：本机采样 > 环境变量 > 新鲜的遥测文件 > 未知。
+// 中文注释：CPU 优先级：显式环境变量 > 新鲜的遥测文件 > 本机采样 > 未知。
+// 中文注释：文件存在但字段无效时不回退到本机采样，避免把失败关闭误报成有效读数。
 function resolveCpu(localSample, file) {
-  if (Number.isFinite(localSample)) return { cpuPercent: localSample, source: 'local' };
   const fromEnv = parseNumericEnv('DAILY_TWIN_CPU_PERCENT');
   if (fromEnv !== null) return { cpuPercent: Number(fromEnv.toFixed(2)), source: 'env' };
   if (file.ok) {
@@ -123,6 +123,7 @@ function resolveCpu(localSample, file) {
     }
     return { cpuPercent: null, source: 'unavailable', reason: 'missing_cpu_percent' };
   }
+  if (Number.isFinite(localSample)) return { cpuPercent: localSample, source: 'local' };
   return { cpuPercent: null, source: 'unavailable', reason: 'os_cpus_times_flat' };
 }
 
