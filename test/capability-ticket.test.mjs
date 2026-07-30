@@ -93,6 +93,28 @@ test('显式目录权限使用字面路径边界，不能用前缀绕过', () =>
   );
 });
 
+test('POSIX 目录权限不能被 Windows 宿主的大小写语义放宽', () => {
+  const ticket = issueCapabilityTicket({
+    secret: SECRET,
+    payload: payload({ directories: ['/srv/TwinTasks/DT-20260730-0001'] })
+  });
+
+  assert.doesNotThrow(() => verifyCapabilityTicket(ticket, {
+    secret: SECRET,
+    now: NOW,
+    request: { action: 'browser.capture', directory: '/srv/TwinTasks/DT-20260730-0001/evidence' }
+  }));
+
+  assert.throws(
+    () => verifyCapabilityTicket(ticket, {
+      secret: SECRET,
+      now: NOW,
+      request: { action: 'browser.capture', directory: '/srv/twintasks/DT-20260730-0001/evidence' }
+    }),
+    (error) => error.code === 'directory_denied'
+  );
+});
+
 test('nonce 只能消费一次，重放必须失败', () => {
   const ticket = issueCapabilityTicket({ secret: SECRET, payload: payload() });
   const store = new TaskStore(':memory:');

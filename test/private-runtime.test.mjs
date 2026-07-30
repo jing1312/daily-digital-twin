@@ -10,14 +10,20 @@ import { readPrivateSecret, resolvePrivatePath } from '../src/core/private-confi
 import { parseRuntimeCommand } from '../src/core/runtime-command.mjs';
 
 test('私有配置路径只能留在 DAILY_TWIN_HOME 内', () => {
-  const home = join('D:\\', 'private', 'daily-twin');
-  assert.match(resolvePrivatePath(home, 'config/apps.json'), /config[\\/]apps\.json$/);
+  const home = 'D:\\private\\daily-twin';
+  assert.equal(resolvePrivatePath(home, 'config/apps.json'), 'D:\\private\\daily-twin\\config\\apps.json');
   assert.throws(
     () => resolvePrivatePath(home, '..\\openclaw.json'),
     (error) => error.code === 'private_path_escape'
   );
   assert.throws(
     () => resolvePrivatePath(home, 'C:\\Windows\\win.ini'),
+    (error) => error.code === 'private_path_escape'
+  );
+
+  assert.equal(resolvePrivatePath('/srv/daily-twin', 'config/apps.json'), '/srv/daily-twin/config/apps.json');
+  assert.throws(
+    () => resolvePrivatePath('/srv/daily-twin', '../openclaw.json'),
     (error) => error.code === 'private_path_escape'
   );
 });

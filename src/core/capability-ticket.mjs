@@ -1,5 +1,5 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
-import { isAbsolute, relative, resolve } from 'node:path';
+import { resolveContainedPath } from './path-boundary.mjs';
 
 export class CapabilityError extends Error {
   constructor(message, code) {
@@ -46,13 +46,9 @@ function denied(condition, message, code) {
 }
 
 function directoryAllowed(allowedRoots, requestedPath) {
-  if (!requestedPath || !isAbsolute(requestedPath)) return false;
-  const requested = resolve(requestedPath);
-  return allowedRoots.some((root) => {
-    if (!isAbsolute(root)) return false;
-    const delta = relative(resolve(root), requested);
-    return delta === '' || (!delta.startsWith('..') && !isAbsolute(delta));
-  });
+  return allowedRoots.some((root) => resolveContainedPath(root, requestedPath, {
+    candidateMustBeAbsolute: true
+  }) !== null);
 }
 
 export function issueCapabilityTicket({ secret, payload }) {

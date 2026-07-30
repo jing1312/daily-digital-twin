@@ -1,11 +1,9 @@
 import { readFile } from 'node:fs/promises';
-import { isAbsolute, relative, resolve } from 'node:path';
+import { resolveContainedPath } from './path-boundary.mjs';
 
 export function resolvePrivatePath(home, configuredPath) {
-  const root = resolve(String(home ?? ''));
-  const candidate = resolve(root, String(configuredPath ?? ''));
-  const rel = relative(root, candidate);
-  if (!configuredPath || rel.startsWith('..') || isAbsolute(rel)) {
+  const candidate = resolveContainedPath(home, configuredPath);
+  if (!candidate) {
     throw Object.assign(new Error('私有配置路径逃出 DAILY_TWIN_HOME'), { code: 'private_path_escape' });
   }
   return candidate;
