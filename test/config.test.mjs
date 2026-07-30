@@ -118,6 +118,57 @@ test('maxSlots 会同步进 resource，避免两处阈值不一致', () => {
 
 test('默认配置包含本轮新增的存储上限与执行验证开关', () => {
   assert.equal(DEFAULT_CONFIG.execution.requireEvidence, true, '默认必须要求执行证据');
+  assert.equal(DEFAULT_CONFIG.execution.workerMaxMinutes, 90, '单轮 worker 最长 90 分钟');
   assert.ok(DEFAULT_CONFIG.storage.keepFreeDiskGb >= 20, '需为系统盘保留余量');
-  assert.equal(DEFAULT_CONFIG.browser.defaultProfile, 'openclaw', '默认不碰用户日常浏览器');
+  assert.equal(DEFAULT_CONFIG.browser.defaultBrowser, 'msedge', '默认只使用 Edge');
+  assert.equal(DEFAULT_CONFIG.browser.extension, true, '通过 Playwright 扩展复用日常登录态');
+  assert.equal(DEFAULT_CONFIG.scheduler.maxParallelWorkers, 4);
+  assert.equal(DEFAULT_CONFIG.resource.minAvailableMemoryGb, 4);
+  assert.equal(DEFAULT_CONFIG.resource.fourSlotMemoryGb, 10);
+  assert.deepEqual(DEFAULT_CONFIG.integrations.multica.workerAgents, [
+    'dt-worker-1', 'dt-worker-2', 'dt-worker-3', 'dt-worker-4'
+  ]);
+  assert.deepEqual(DEFAULT_CONFIG.integrations.multica.allowedDirectories, []);
+});
+
+test('Multica worker agent 必须唯一且最多四个，允许目录必须留在私有配置中', () => {
+  assert.throws(
+    () => validateConfig(mergeConfig(DEFAULT_CONFIG, {
+      integrations: { multica: { workerAgents: ['same', 'same'] } }
+    })),
+    ConfigError
+  );
+  assert.throws(
+    () => validateConfig(mergeConfig(DEFAULT_CONFIG, {
+      integrations: { multica: { workerAgents: ['a', 'b', 'c', 'd', 'e'] } }
+    })),
+    ConfigError
+  );
+});
+
+test('配置不能突破四任务上限或把电池模式放宽到多个重型槽', () => {
+  for (const override of [
+    { maxSlots: 5 },
+    { openTaskLimit: 5 },
+    { scheduler: { maxParallelWorkers: 5 } },
+    { scheduler: { maxForegroundTasks: 2 } },
+    { resource: { batterySlotLimit: 2 } }
+  ]) {
+    assert.throws(
+      () => validateConfig(mergeConfig(DEFAULT_CONFIG, override)),
+      ConfigError,
+      JSON.stringify(override)
+    );
+  }
+});
+
+test('数据库和私有配置文件路径不得逃出 DAILY_TWIN_HOME', () => {
+  for (const override of [
+    { database: '../outside.sqlite' },
+    { database: 'C:\\outside.sqlite' },
+    { integrations: { appCatalog: '..\\apps.json' } },
+    { integrations: { capabilitySecretFile: '/tmp/secret' } }
+  ]) {
+    assert.throws(() => validateConfig(mergeConfig(DEFAULT_CONFIG, override)), ConfigError);
+  }
 });

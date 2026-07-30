@@ -109,20 +109,62 @@ function Write-DailyTwinResult {
     $InputObject | ConvertTo-Json -Depth $Depth -Compress
 }
 
+function Test-DailyTwinCutoverHealth {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]$Health,
+        [ValidateRange(1, 8760)][double]$StableHours = 48,
+        [ValidateRange(1, 60)][double]$MaxHeartbeatAgeMinutes = 5,
+        [DateTime]$Now = [DateTime]::UtcNow,
+        [scriptblock]$IsProcessAlive
+    )
+
+    if ((Get-DailyTwinProperty -InputObject $Health -Name 'status') -ne 'running') { return $false }
+    try {
+        $healthPid = [int](Get-DailyTwinProperty -InputObject $Health -Name 'pid')
+        $startedAt = [DateTime]::Parse((Get-DailyTwinProperty -InputObject $Health -Name 'startedAt')).ToUniversalTime()
+        $heartbeatAt = [DateTime]::Parse((Get-DailyTwinProperty -InputObject $Health -Name 'lastHeartbeatAt')).ToUniversalTime()
+    } catch {
+        return $false
+    }
+    if ($healthPid -le 0) { return $false }
+
+    $nowUtc = $Now.ToUniversalTime()
+    $ageHours = ($nowUtc - $startedAt).TotalHours
+    $heartbeatAgeMinutes = ($nowUtc - $heartbeatAt).TotalMinutes
+    if ($ageHours -lt $StableHours -or $heartbeatAgeMinutes -lt 0 -or $heartbeatAgeMinutes -gt $MaxHeartbeatAgeMinutes) {
+        return $false
+    }
+
+    if ($null -eq $IsProcessAlive) {
+        $IsProcessAlive = { param($candidatePid) $null -ne (Get-Process -Id $candidatePid -ErrorAction SilentlyContinue) }
+    }
+    try {
+        return [bool](& $IsProcessAlive $healthPid)
+    } catch {
+        return $false
+    }
+}
+
 # 中文注释：pwsh.exe 缺失是本机最常见的开机失败原因之一，注册计划任务前必须先确认。
 function Resolve-DailyTwinPwsh {
     [CmdletBinding()]
     param([string]$Preferred = 'pwsh.exe')
 
-    # 中文注释：调用方若明确指定了非标准名称，找不到时必须失败，不得猜测成另一份 pwsh。
-    if (-not [string]::IsNullOrWhiteSpace($Preferred) -and
-        [System.IO.Path]::GetFileName($Preferred) -notin @('pwsh', 'pwsh.exe') -and
-        -not [System.IO.Path]::IsPathRooted($Preferred)) {
-        return $null
+    if ([string]::IsNullOrWhiteSpace($Preferred)) { return $null }
+    if ([System.Management.Automation.WildcardPattern]::ContainsWildcardCharacters($Preferred)) { return $null }
+
+    $fileName = [System.IO.Path]::GetFileName($Preferred)
+    if ($fileName -notin @('pwsh', 'pwsh.exe')) { return $null }
+
+    $directoryName = [System.IO.Path]::GetDirectoryName($Preferred)
+    if (-not [string]::IsNullOrWhiteSpace($directoryName)) {
+        if (-not (Test-Path -LiteralPath $Preferred -PathType Leaf)) { return $null }
+        return (Resolve-Path -LiteralPath $Preferred).Path
     }
 
-    $command = Get-Command -Name $Preferred -CommandType Application -ErrorAction SilentlyContinue |
-        Select-Object -First 1
+    # 中文注释：只有裸名 pwsh/pwsh.exe 才允许查 PATH 或标准安装位置。
+    $command = Get-Command -Name $Preferred -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($command) { return $command.Source }
 
     # 中文注释：这些环境变量在服务账号或非标准架构下可能为空，Join-Path 收到 $null 会直接抛异常。
@@ -141,6 +183,29 @@ function Resolve-DailyTwinPwsh {
     return $null
 }
 
+function Resolve-DailyTwinExecutable {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Preferred,
+        [Parameter(Mandatory = $true)][string[]]$AllowedNames
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Preferred)) { return $null }
+    if ([System.Management.Automation.WildcardPattern]::ContainsWildcardCharacters($Preferred)) { return $null }
+    $fileName = [System.IO.Path]::GetFileName($Preferred)
+    if ($AllowedNames -notcontains $fileName) { return $null }
+
+    $directoryName = [System.IO.Path]::GetDirectoryName($Preferred)
+    if (-not [string]::IsNullOrWhiteSpace($directoryName)) {
+        if (-not (Test-Path -LiteralPath $Preferred -PathType Leaf)) { return $null }
+        return (Resolve-Path -LiteralPath $Preferred).Path
+    }
+
+    $command = Get-Command -Name $Preferred -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($command) { return $command.Source }
+    return $null
+}
+
 # 中文注释：私有目录必须显式给出，绝不回落到仓库目录（对应内核里的 B13b/B14）。
 # 中文注释：参数名刻意用 PrivateHome 而不是 Home —— $HOME 是 PowerShell 的自动变量，占用它就是 B18 那类错误。
 function Resolve-DailyTwinHome {
@@ -153,6 +218,48 @@ function Resolve-DailyTwinHome {
     throw '未配置私有目录。请先运行 Set-DailyTwinPaths.ps1，或设置环境变量 DAILY_TWIN_HOME。'
 }
 
+function Enter-DailyTwinProcessLock {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$HomeDirectory,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    if ([string]::IsNullOrWhiteSpace($HomeDirectory)) { throw '进程锁缺少私有目录' }
+    if ($Name -notmatch '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$') { throw "进程锁名称非法：$Name" }
+
+    $lockDirectory = Join-Path $HomeDirectory 'data\locks'
+    if (-not (Test-Path -LiteralPath $lockDirectory -PathType Container)) {
+        New-Item -ItemType Directory -Force -Path $lockDirectory | Out-Null
+    }
+    $lockPath = Join-Path $lockDirectory "$Name.lock"
+    try {
+        $stream = New-Object System.IO.FileStream(
+            $lockPath,
+            [System.IO.FileMode]::OpenOrCreate,
+            [System.IO.FileAccess]::ReadWrite,
+            [System.IO.FileShare]::None
+        )
+    } catch [System.IO.IOException] {
+        throw "Daily Twin $Name 已在运行，不能启动第二个实例。锁文件：$lockPath"
+    }
+
+    try {
+        $owner = [pscustomobject]@{
+            pid = $PID
+            startedAt = [DateTime]::UtcNow.ToString('o')
+        } | ConvertTo-Json -Compress
+        $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($owner)
+        $stream.SetLength(0)
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush()
+        return $stream
+    } catch {
+        $stream.Dispose()
+        throw
+    }
+}
+
 # 中文注释：磁盘剩余空间按卷返回 GB，取不到时返回 $null 而不是 0，避免被当成"磁盘满了"。
 # 中文注释：允许空路径 —— 这个函数被遥测采集调用，遥测采集绝不能因为一个取不到的环境变量整体崩掉。
 function Get-DailyTwinFreeSpaceGb {
@@ -160,6 +267,18 @@ function Get-DailyTwinFreeSpaceGb {
     param([Parameter(Mandatory = $true)][AllowEmptyString()][AllowNull()][string]$Path)
 
     if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
+
+    try {
+        $rootPath = [System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath($Path))
+        if (-not [string]::IsNullOrWhiteSpace($rootPath)) {
+            $driveInfo = New-Object System.IO.DriveInfo($rootPath)
+            if ($driveInfo.IsReady) {
+                return [math]::Round([double]$driveInfo.AvailableFreeSpace / 1GB, 2)
+            }
+        }
+    } catch {
+        Write-Verbose "DriveInfo 读取磁盘剩余空间失败（$Path）：$($_.Exception.Message)"
+    }
 
     try {
         $qualifier = Split-Path -Path ([System.IO.Path]::GetFullPath($Path)) -Qualifier

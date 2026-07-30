@@ -27,23 +27,11 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 24
-          # 中文注释：本项目零依赖、没有 lock 文件，开缓存反而会报错。
-          package-manager-cache: false
+          cache: npm
+          cache-dependency-path: package-lock.json
 
-      - name: 确认仍然零依赖
-        run: |
-          node -e "
-            const pkg = require('./package.json');
-            const declared = [
-              ...Object.keys(pkg.dependencies ?? {}),
-              ...Object.keys(pkg.devDependencies ?? {})
-            ];
-            if (declared.length > 0) {
-              console.error('本项目约定零依赖，但发现：' + declared.join(', '));
-              process.exit(1);
-            }
-            console.log('零依赖检查通过');
-          "
+      - name: 按锁文件安装依赖
+        run: npm ci
 
       - name: 单元测试
         run: node --disable-warning=ExperimentalWarning --test
@@ -64,7 +52,11 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 24
-          package-manager-cache: false
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: 按锁文件安装依赖
+        run: npm ci
 
       - name: 确认检出后的 .ps1 仍是 UTF-8 BOM + CRLF
         shell: pwsh

@@ -119,6 +119,93 @@ test('platform/windows 下确实有脚本，避免这组测试变成空跑', () 
   assert.ok(scripts.length >= 8, `期望至少 8 个脚本，实际 ${scripts.length}`);
   assert.ok(scripts.includes('DailyTwin.Common.ps1'), '公共库必须存在，其他脚本都点号引入它');
   assert.ok(scripts.includes('Write-DailyTwinTelemetry.ps1'), 'src/core/telemetry.mjs 依赖这个脚本存在');
+  for (const required of [
+    'Start-DailyTwinControlPlane.ps1',
+    'Start-DailyTwinTelemetry.ps1',
+    'Start-MulticaDaemon.ps1',
+    'Install-DailyTwinServices.ps1',
+    'Complete-DailyTwinCutover.ps1',
+    'Rollback-DailyTwinServices.ps1'
+  ]) {
+    assert.ok(scripts.includes(required), `缺少 Windows 运行脚本：${required}`);
+  }
+});
+
+test('新控制平面脚本保持真实进程和可回滚边界', () => {
+  const control = readScript('Start-DailyTwinControlPlane.ps1');
+  assert.match(control, /runtime\.mjs/);
+  assert.match(control, /['"]serve['"]/);
+  assert.match(control, /LASTEXITCODE/);
+  assert.doesNotMatch(powerShellCodeOnly(control), /Start-Process\s+[^\r\n]*runtime\.mjs/i, 'Node 必须是计划任务主体，不能启动后立刻退出');
+
+  const cutover = readScript('Complete-DailyTwinCutover.ps1');
+  assert.match(cutover, /48/);
+  assert.match(cutover, /Disable-ScheduledTask/);
+  const rollback = readScript('Rollback-DailyTwinServices.ps1');
+  assert.match(rollback, /Enable-ScheduledTask/);
+  assert.doesNotMatch(powerShellCodeOnly(rollback), /Remove-Item|Clear-Content/, '回滚不得删除任务数据或凭据');
+});
+
+test('服务安装脚本同步当前进程环境，并只回报实际注册的任务', () => {
+  const install = readScript('Install-DailyTwinServices.ps1');
+  assert.match(install, /\$env:DAILY_TWIN_HOME\s*=\s*\$resolvedHome/);
+  assert.match(install, /\$env:DAILY_TWIN_NODE\s*=\s*\$resolvedNode/);
+  assert.match(install, /\$env:DAILY_TWIN_MULTICA\s*=\s*\$resolvedMultica/);
+  assert.match(install, /\$taskNames\s*=\s*@\(/);
+  assert.match(install, /if\s*\(\$resolvedMultica\)\s*\{[^}]*\$taskNames\s*\+=/s);
+  assert.match(install, /tasks\s*=\s*\$taskNames/);
+});
+
+test('计划任务动作显式携带私有目录和已核验命令，不依赖重新登录刷新环境变量', () => {
+  const startup = readScript('Install-DailyTwinStartup.ps1');
+  assert.match(startup, /\[string\[\]\]\$RuntimeArguments/);
+  assert.match(startup, /\$RuntimeArguments/);
+  assert.match(startup, /New-ScheduledTaskAction[^\r\n]*-Execute\s+\$pwshPath/s);
+
+  const install = readScript('Install-DailyTwinServices.ps1');
+  assert.match(install, /Start-DailyTwinControlPlane\.ps1['"]?\)[^\r\n]*-RuntimeArguments[^\r\n]*PrivateHome[^\r\n]*\$resolvedHome[^\r\n]*NodePath[^\r\n]*\$resolvedNode/i);
+  assert.match(install, /Start-DailyTwinTelemetry\.ps1['"]?\)[^\r\n]*-RuntimeArguments[^\r\n]*PrivateHome[^\r\n]*\$resolvedHome/i);
+  assert.match(install, /Start-MulticaDaemon\.ps1['"]?\)[^\r\n]*-RuntimeArguments[^\r\n]*PrivateHome[^\r\n]*\$resolvedHome[^\r\n]*MulticaPath[^\r\n]*\$resolvedMultica/i);
+  const multica = readScript('Start-MulticaDaemon.ps1');
+  assert.match(multica, /\$env:DAILY_TWIN_HOME\s*=\s*\$resolvedHome/);
+});
+
+test('计划任务预览不调用系统注册 API，真实注册错误必须终止而不是假报成功', () => {
+  const startup = readScript('Install-DailyTwinStartup.ps1');
+  assert.match(startup, /if\s*\(\$WhatIfPreference\)[\s\S]*else[\s\S]*New-ScheduledTaskAction/);
+  for (const command of [
+    'New-ScheduledTaskAction',
+    'New-ScheduledTaskTrigger',
+    'New-ScheduledTaskSettingsSet',
+    'New-ScheduledTaskPrincipal',
+    'Register-ScheduledTask'
+  ]) {
+    assert.match(startup, new RegExp(`${command}[^\\r\\n]*-ErrorAction\\s+Stop`, 'i'), `${command} 必须失败关闭`);
+  }
+  assert.match(startup, /status\s*=\s*if\s*\(\$WhatIfPreference\)\s*\{\s*['"]preview['"]\s*\}/i);
+});
+
+test('遥测启动脚本持有单实例锁直到采样循环退出', () => {
+  const telemetry = readScript('Start-DailyTwinTelemetry.ps1');
+  assert.match(telemetry, /Enter-DailyTwinProcessLock[^\r\n]*-Name\s+['"]telemetry['"]/);
+  assert.match(telemetry, /finally\s*\{[^}]*\.Dispose\(\)/s);
+});
+
+test('PowerShell 初始化目录覆盖 worker 与进程锁，不与 Node 私有目录分叉', () => {
+  for (const name of ['Initialize-DailyTwinHome.ps1', 'Set-DailyTwinPaths.ps1']) {
+    const script = readScript(name);
+    assert.match(script, /data\\workers/, `${name} 缺少 data\\workers`);
+    assert.match(script, /data\\locks/, `${name} 缺少 data\\locks`);
+  }
+});
+
+test('doctor 检查新控制平面、Multica 和 Edge 配置，不再把 OpenClaw 端口当主链', () => {
+  const doctor = readScript('Invoke-DailyTwinDoctor.ps1');
+  assert.match(doctor, /control-plane-health\.json/);
+  assert.match(doctor, /DailyDigitalTwin-ControlPlane/);
+  assert.match(doctor, /DAILY_TWIN_MULTICA/);
+  assert.match(doctor, /Playwright Extension/);
+  assert.doesNotMatch(powerShellCodeOnly(doctor), /Get-NetTCPConnection/);
 });
 
 test('每个 .ps1 都必须是 UTF-8 with BOM', () => {

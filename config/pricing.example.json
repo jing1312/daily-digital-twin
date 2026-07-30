@@ -1,0 +1,9 @@
+{
+  "models": {
+    "your-model-id": {
+      "inputPerMillion": 0,
+      "cachedInputPerMillion": 0,
+      "outputPerMillion": 0
+    }
+  }
+}

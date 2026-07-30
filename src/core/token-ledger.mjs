@@ -12,8 +12,19 @@ export function recordTokenUsage(db, usage) {
   ensureTokenLedger(db);
   db.prepare(`
     INSERT INTO token_ledger
-      (task_id, worker_id, model, input_tokens, cached_tokens, output_tokens, cache_hit, latency_ms, estimated_cost, recorded_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (task_id, worker_id, model, input_tokens, cached_tokens, output_tokens, cache_hit,
+       latency_ms, estimated_cost, external_usage_id, recorded_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(task_id, external_usage_id) WHERE external_usage_id IS NOT NULL DO UPDATE SET
+      worker_id = excluded.worker_id,
+      model = excluded.model,
+      input_tokens = excluded.input_tokens,
+      cached_tokens = excluded.cached_tokens,
+      output_tokens = excluded.output_tokens,
+      cache_hit = excluded.cache_hit,
+      latency_ms = excluded.latency_ms,
+      estimated_cost = excluded.estimated_cost,
+      recorded_at = excluded.recorded_at
   `).run(
     usage.taskId,
     String(usage.workerId ?? 'local'),
@@ -24,6 +35,7 @@ export function recordTokenUsage(db, usage) {
     usage.cacheHit ? 1 : 0,
     Number(usage.latencyMs ?? 0),
     usage.estimatedCost ?? null,
+    usage.usageId ? String(usage.usageId) : null,
     new Date().toISOString()
   );
 }

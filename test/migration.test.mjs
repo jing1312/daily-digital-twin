@@ -94,7 +94,7 @@ test('迁移建立本轮新增的表', () => {
   withTempDatabase((path) => {
     createLegacyDatabase(path).close();
     const store = new TaskStore(path);
-    for (const table of ['settings', 'verification_waits', 'execution_evidence', 'token_ledger', 'schema_meta']) {
+    for (const table of ['settings', 'verification_waits', 'execution_evidence', 'token_ledger', 'task_browser_sessions', 'schema_meta']) {
       assert.equal(tableExists(store.db, table), true, `应创建表 ${table}`);
     }
     store.close();

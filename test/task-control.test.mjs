@@ -31,6 +31,19 @@ test('全局最多同时保留四个活跃任务', () => {
   assert.throws(() => store.createTask({ request: '第五个任务' }), /四个/);
 });
 
+test('默认最多保留四个未结束逻辑任务，暂停只让出执行槽', () => {
+  const store = createStore();
+  const tasks = [];
+  for (let index = 0; index < 4; index += 1) {
+    tasks.push(store.createTask({ request: `逻辑任务 ${index}` }));
+  }
+  for (const task of tasks) store.pause(task.id);
+
+  assert.equal(store.countRunnableTasks(), 0);
+  assert.equal(store.countOpenTasks(), 4);
+  assert.throws(() => store.createTask({ request: '第五个逻辑任务' }), /未结束任务已达上限 4/);
+});
+
 test('单一等待验证码任务可直接接收数字回复', () => {
   const store = createStore();
   const task = store.createTask({ request: '登录 Biomni' });
@@ -111,7 +124,7 @@ test('B1b：只有 running 任务暂停时才回落到 queued，且暂停可重�
 });
 
 test('B2：暂停的任务不再占用活跃槽位', () => {
-  const store = createStore();
+  const store = createStore({ openTaskLimit: 16 });
   const tasks = [];
   for (let index = 0; index < 4; index += 1) {
     tasks.push(store.createTask({ request: `任务 ${index}` }));
@@ -146,6 +159,20 @@ test('B2c：继续一个未暂停的任务应被明确拒绝而不是静默成�
   const result = store.resume(task.id);
   assert.equal(result.ok, false);
   assert.equal(result.code, 'not_paused');
+});
+
+test('等待登录的未暂停任务收到继续指令后重新排队', () => {
+  const store = createStore();
+  const task = store.createTask({ request: '登录 Biomni 后继续' });
+  store.transition(task.id, 'running');
+  store.transition(task.id, 'waiting_for_user', { reason: '需要登录' });
+
+  const resumed = store.continueTask(task.id);
+
+  assert.equal(resumed.ok, true);
+  assert.equal(resumed.task.state, 'queued');
+  assert.equal(resumed.task.paused, false);
+  assert.equal(resumed.task.reason, null);
 });
 
 test('B9：终态流转不得擦掉原因，并且失败原因可持久追溯', () => {
@@ -202,4 +229,22 @@ test('取消任务会释放它持有的全部资源锁', () => {
 
   assert.equal(store.listLocks(first.id).length, 0, '终态任务不得继续持锁');
   assert.equal(store.tryAcquireLock(second.id, 'browser:default').ok, true);
+});
+
+test('终态任务清除本机浏览器映射，但不保存 Cookie 或页面内容', () => {
+  const store = createStore();
+  const task = store.createTask({ request: '打开 Biomni' });
+  store.saveBrowserSession(task.id, {
+    websiteId: 'biomni',
+    targetId: 'edge:2:DT%3ADT-20260730-0001',
+    marker: `DT:${task.publicId}`
+  });
+  const serialized = JSON.stringify(store.getBrowserSession(task.id));
+  assert.equal(/cookie|password|页面内容/i.test(serialized), false);
+
+  store.transition(task.id, 'running');
+  store.transition(task.id, 'completed', { summary: '完成' });
+
+  assert.equal(store.getBrowserSession(task.id), null);
+  store.close();
 });

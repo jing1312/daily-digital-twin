@@ -1,7 +1,8 @@
 // 中文注释：解析飞书文本为本机控制动作，避免验证码落盘或被误当成新任务。
 
-const COMMAND_PATTERN = /^(状态|暂停|继续|取消)(?:\s*(\d+))?$/;
-const QUALIFIED_CODE_PATTERN = /^任务\s*(\d+)\s*[：:]\s*(\d{4,10})$/;
+const TASK_REFERENCE = '(?:DT-\\d{8}-\\d{4}|\\d+)';
+const COMMAND_PATTERN = new RegExp(`^(状态|暂停|继续|取消|看证据)(?:\\s*(${TASK_REFERENCE}))?$`, 'i');
+const QUALIFIED_CODE_PATTERN = new RegExp(`^任务\\s*(${TASK_REFERENCE})\\s*[：:]\\s*(\\d{4,10})$`, 'i');
 const BARE_CODE_PATTERN = /^\d{4,10}$/;
 
 export function resolveIncomingMessage(store, message) {
@@ -10,14 +11,19 @@ export function resolveIncomingMessage(store, message) {
 
   const command = text.match(COMMAND_PATTERN);
   if (command) {
-    return {
-      kind: command[1] === '状态' ? 'status' : command[1],
-      taskId: command[2] ? Number(command[2]) : null
-    };
+    const kind = command[1] === '状态' ? 'status' : command[1];
+    if (command[2]?.toUpperCase().startsWith('DT-')) return { kind, taskRef: command[2].toUpperCase() };
+    return { kind, taskId: command[2] ? Number(command[2]) : null };
   }
 
   const qualifiedCode = text.match(QUALIFIED_CODE_PATTERN);
-  if (qualifiedCode) return { kind: 'verification_code', taskId: Number(qualifiedCode[1]), code: qualifiedCode[2] };
+  if (qualifiedCode) {
+    if (qualifiedCode[1].toUpperCase().startsWith('DT-')) {
+      const task = store.getTaskByPublicId(qualifiedCode[1].toUpperCase());
+      return { kind: 'verification_code', taskId: task?.id ?? null, taskRef: qualifiedCode[1].toUpperCase(), code: qualifiedCode[2] };
+    }
+    return { kind: 'verification_code', taskId: Number(qualifiedCode[1]), code: qualifiedCode[2] };
+  }
 
   if (BARE_CODE_PATTERN.test(text)) {
     const waiters = store.listVerificationWaiters();

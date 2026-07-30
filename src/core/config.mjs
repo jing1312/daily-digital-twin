@@ -10,11 +10,14 @@ export const CONFIG_FILE = 'config/runtime.json';
 export const DEFAULT_CONFIG = {
   database: 'data/runtime.sqlite',
   maxSlots: DEFAULT_RESOURCE_LIMITS.maxSlots,
-  openTaskLimit: 16,
+  openTaskLimit: 4,
   busyTimeoutMs: 5000,
   resource: {
     cpuLimitPercent: DEFAULT_RESOURCE_LIMITS.cpuLimitPercent,
     minAvailableMemoryGb: DEFAULT_RESOURCE_LIMITS.minAvailableMemoryGb,
+    oneSlotMemoryGb: DEFAULT_RESOURCE_LIMITS.oneSlotMemoryGb,
+    twoSlotMemoryGb: DEFAULT_RESOURCE_LIMITS.twoSlotMemoryGb,
+    fourSlotMemoryGb: DEFAULT_RESOURCE_LIMITS.fourSlotMemoryGb,
     minDiskFreeGb: DEFAULT_RESOURCE_LIMITS.minDiskFreeGb,
     batterySlotLimit: DEFAULT_RESOURCE_LIMITS.batterySlotLimit,
     maxSlots: DEFAULT_RESOURCE_LIMITS.maxSlots
@@ -30,15 +33,13 @@ export const DEFAULT_CONFIG = {
     // 中文注释：默认休眠，必须由用户显式启用（按约定的调度开关策略）。
     enabled: false,
     pollSeconds: 5,
-    maxParallelWorkers: 2,
+    maxParallelWorkers: 4,
     maxForegroundTasks: 1
   },
   browser: {
-    // 中文注释：默认使用受管浏览器，不碰用户日常浏览器的登录态。详见 docs/BROWSER-PROFILES.md。
-    defaultProfile: 'openclaw',
-    signedInProfile: null,
-    snapshotMode: 'efficient',
-    edgeUserDataDir: null
+    defaultBrowser: 'msedge',
+    extension: true,
+    playwrightCommand: 'playwright-mcp'
   },
   storage: {
     maxCacheMb: 2048,
@@ -49,7 +50,28 @@ export const DEFAULT_CONFIG = {
     logKeepFiles: 7
   },
   execution: {
-    requireEvidence: true
+    requireEvidence: true,
+    workerMaxMinutes: 90
+  },
+  integrations: {
+    appCatalog: 'config/apps.json',
+    pricing: 'config/pricing.json',
+    capabilitySecretFile: 'config/capability-hmac.secret',
+    feishu: {
+      appId: null,
+      appSecretFile: 'config/feishu-app-secret.secret',
+      allowedOpenIds: []
+    },
+    multica: {
+      enabled: true,
+      command: 'multica',
+      plannerAgent: 'dt-planner',
+      workerAgents: ['dt-worker-1', 'dt-worker-2', 'dt-worker-3', 'dt-worker-4'],
+      allowedDirectories: []
+    }
+  },
+  windows: {
+    pwshPath: null
   }
 };
 
@@ -81,6 +103,12 @@ function checkPositiveInteger(problems, path, value) {
   if (!Number.isInteger(value) || value <= 0) problems.push(`${path} 必须是正整数，实际为 ${JSON.stringify(value)}`);
 }
 
+function checkIntegerInRange(problems, path, value, min, max) {
+  if (!Number.isInteger(value) || value < min || value > max) {
+    problems.push(`${path} 必须是 ${min}~${max} 之间的整数，实际为 ${JSON.stringify(value)}`);
+  }
+}
+
 function checkNumberInRange(problems, path, value, min, max) {
   if (!Number.isFinite(value) || value < min || value > max) {
     problems.push(`${path} 必须是 ${min}~${max} 之间的数值，实际为 ${JSON.stringify(value)}`);
@@ -91,20 +119,30 @@ function checkBoolean(problems, path, value) {
   if (typeof value !== 'boolean') problems.push(`${path} 必须是布尔值，实际为 ${JSON.stringify(value)}`);
 }
 
+function checkPrivateRelativePath(problems, path, value) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  const portable = text.replaceAll('\\', '/');
+  const segments = portable.split('/');
+  if (!text || portable.startsWith('/') || /^[A-Za-z]:\//.test(portable) || portable.startsWith('//') || segments.includes('..')) {
+    problems.push(`${path} 必须是 DAILY_TWIN_HOME 内的相对路径，实际为 ${JSON.stringify(value)}`);
+  }
+}
+
 // 中文注释：校验后再交给策略模块，避免把 "4" 这类字符串当成数字用。
 export function validateConfig(config) {
   const problems = [];
-  checkPositiveInteger(problems, 'maxSlots', config.maxSlots);
-  checkPositiveInteger(problems, 'openTaskLimit', config.openTaskLimit);
+  checkIntegerInRange(problems, 'maxSlots', config.maxSlots, 1, 4);
+  checkIntegerInRange(problems, 'openTaskLimit', config.openTaskLimit, 1, 4);
   checkPositiveInteger(problems, 'busyTimeoutMs', config.busyTimeoutMs);
-  if (typeof config.database !== 'string' || config.database.trim().length === 0) {
-    problems.push('database 必须是相对于私有目录的路径字符串');
-  }
+  checkPrivateRelativePath(problems, 'database', config.database);
 
   checkNumberInRange(problems, 'resource.cpuLimitPercent', config.resource?.cpuLimitPercent, 1, 100);
   checkNumberInRange(problems, 'resource.minAvailableMemoryGb', config.resource?.minAvailableMemoryGb, 0, 1024);
+  checkNumberInRange(problems, 'resource.oneSlotMemoryGb', config.resource?.oneSlotMemoryGb, 0, 1024);
+  checkNumberInRange(problems, 'resource.twoSlotMemoryGb', config.resource?.twoSlotMemoryGb, 0, 1024);
+  checkNumberInRange(problems, 'resource.fourSlotMemoryGb', config.resource?.fourSlotMemoryGb, 0, 1024);
   checkNumberInRange(problems, 'resource.minDiskFreeGb', config.resource?.minDiskFreeGb, 0, 10240);
-  checkPositiveInteger(problems, 'resource.batterySlotLimit', config.resource?.batterySlotLimit);
+  checkIntegerInRange(problems, 'resource.batterySlotLimit', config.resource?.batterySlotLimit, 1, 1);
 
   checkPositiveInteger(problems, 'retries.maxAttempts', config.retries?.maxAttempts);
   const backoff = config.retries?.backoffSeconds;
@@ -115,11 +153,42 @@ export function validateConfig(config) {
   checkPositiveInteger(problems, 'verification.ttlSeconds', config.verification?.ttlSeconds);
   checkBoolean(problems, 'scheduler.enabled', config.scheduler?.enabled);
   checkPositiveInteger(problems, 'scheduler.pollSeconds', config.scheduler?.pollSeconds);
-  checkPositiveInteger(problems, 'scheduler.maxParallelWorkers', config.scheduler?.maxParallelWorkers);
+  checkIntegerInRange(problems, 'scheduler.maxParallelWorkers', config.scheduler?.maxParallelWorkers, 1, 4);
+  checkIntegerInRange(problems, 'scheduler.maxForegroundTasks', config.scheduler?.maxForegroundTasks, 1, 1);
   checkBoolean(problems, 'execution.requireEvidence', config.execution?.requireEvidence);
+  checkPositiveInteger(problems, 'execution.workerMaxMinutes', config.execution?.workerMaxMinutes);
 
-  if (typeof config.browser?.defaultProfile !== 'string' || config.browser.defaultProfile.trim().length === 0) {
-    problems.push('browser.defaultProfile 必须是 profile 名称字符串');
+  if (config.browser?.defaultBrowser !== 'msedge') problems.push('browser.defaultBrowser 必须固定为 msedge');
+  checkBoolean(problems, 'browser.extension', config.browser?.extension);
+  if (typeof config.browser?.playwrightCommand !== 'string' || !config.browser.playwrightCommand.trim()) {
+    problems.push('browser.playwrightCommand 必须是命令名称或已核验路径');
+  }
+
+  checkPrivateRelativePath(problems, 'integrations.appCatalog', config.integrations?.appCatalog);
+  checkPrivateRelativePath(problems, 'integrations.pricing', config.integrations?.pricing);
+  checkPrivateRelativePath(problems, 'integrations.capabilitySecretFile', config.integrations?.capabilitySecretFile);
+  checkPrivateRelativePath(problems, 'integrations.feishu.appSecretFile', config.integrations?.feishu?.appSecretFile);
+
+  const multica = config.integrations?.multica;
+  checkBoolean(problems, 'integrations.multica.enabled', multica?.enabled);
+  for (const field of ['command', 'plannerAgent']) {
+    if (typeof multica?.[field] !== 'string' || !multica[field].trim()) {
+      problems.push(`integrations.multica.${field} 必须是非空字符串`);
+    }
+  }
+  const workerAgents = multica?.workerAgents;
+  if (!Array.isArray(workerAgents) || workerAgents.length < 1 || workerAgents.length > 4 ||
+      workerAgents.some((item) => typeof item !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(item)) ||
+      new Set(workerAgents).size !== workerAgents.length) {
+    problems.push('integrations.multica.workerAgents 必须包含 1~4 个唯一的安全名称');
+  }
+  if (!Array.isArray(multica?.allowedDirectories) || multica.allowedDirectories.some((item) => typeof item !== 'string' || !item.trim())) {
+    problems.push('integrations.multica.allowedDirectories 必须是非空字符串组成的数组');
+  }
+
+  const memory = config.resource ?? {};
+  if (!(memory.minAvailableMemoryGb <= memory.oneSlotMemoryGb && memory.oneSlotMemoryGb <= memory.twoSlotMemoryGb && memory.twoSlotMemoryGb <= memory.fourSlotMemoryGb)) {
+    problems.push('资源内存档位必须满足 min <= oneSlot <= twoSlot <= fourSlot');
   }
 
   if (problems.length > 0) throw new ConfigError(problems);

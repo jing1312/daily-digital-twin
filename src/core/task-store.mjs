@@ -7,9 +7,9 @@ const FAILURE_STATES = new Set(['failed', 'partial', 'retrying']);
 export const VERIFICATION_REASON = '需要验证码';
 
 const TRANSITIONS = {
-  queued: new Set(['running', 'cancelled']),
+  queued: new Set(['running', 'failed', 'cancelled']),
   running: new Set(['queued', 'waiting_for_user', 'retrying', 'completed', 'partial', 'failed', 'cancelled']),
-  waiting_for_user: new Set(['running', 'partial', 'failed', 'cancelled']),
+  waiting_for_user: new Set(['queued', 'running', 'partial', 'failed', 'cancelled']),
   retrying: new Set(['running', 'failed', 'cancelled']),
   completed: new Set(),
   partial: new Set(),
@@ -19,7 +19,7 @@ const TRANSITIONS = {
 
 const DEFAULTS = {
   maxSlots: 4,
-  openTaskLimit: 16,
+  openTaskLimit: 4,
   busyTimeoutMs: 5000,
   verificationTtlSeconds: 600,
   busyRetries: 5,
@@ -46,6 +46,9 @@ function mapTask(row) {
   if (!row) return null;
   return {
     id: row.id,
+    publicId: row.public_id ?? null,
+    multicaIssueId: row.multica_issue_id ?? null,
+    taskKind: row.task_kind ?? 'general',
     request: row.request,
     state: row.state,
     paused: Boolean(row.paused),
@@ -56,6 +59,31 @@ function mapTask(row) {
     attempt: Number(row.attempt ?? 0),
     resumeState: row.resume_state ?? null,
     ownerOpenId: row.owner_open_id ?? null,
+    replyChatId: row.reply_chat_id ?? null,
+    sourceMessageId: row.source_message_id ?? null,
+    retryAfter: row.retry_after ?? null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function mapTaskWorker(row) {
+  if (!row) return null;
+  let capabilities = {};
+  try { capabilities = JSON.parse(row.capabilities ?? '{}'); } catch {}
+  return {
+    id: Number(row.id),
+    taskId: Number(row.task_id),
+    subtaskId: row.subtask_id,
+    workerId: row.worker_id ?? null,
+    multicaIssueId: row.multica_issue_id ?? null,
+    state: row.state,
+    title: row.title,
+    instructions: row.instructions,
+    capabilities,
+    bindingPath: row.binding_path ?? null,
+    summary: row.summary ?? null,
+    failureReason: row.failure_reason ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
@@ -114,7 +142,7 @@ export class TaskStore {
   }
 
   // 中文注释：创建任务。槽位只统计"未暂停的未结束任务"，暂停即让出槽位（修 B2）。
-  createTask({ request, ownerOpenId = null } = {}) {
+  createTask({ request, ownerOpenId = null, replyChatId = null, sourceMessageId = null } = {}) {
     if (!request?.trim()) throw new Error('任务内容不能为空');
     return this.writeTransaction(() => {
       if (this.countRunnableTasks() >= this.options.maxSlots) {
@@ -124,10 +152,18 @@ export class TaskStore {
         throw new Error(`未结束任务已达上限 ${this.options.openTaskLimit}，请先取消或完成部分任务`);
       }
       const timestamp = now();
+      const dateKey = timestamp.slice(0, 10).replaceAll('-', '');
+      const counter = this.db.prepare(`
+        INSERT INTO daily_task_counters (date_key, next_value, updated_at) VALUES (?, 2, ?)
+        ON CONFLICT(date_key) DO UPDATE SET next_value = next_value + 1, updated_at = excluded.updated_at
+        RETURNING next_value - 1 AS sequence
+      `).get(dateKey, timestamp);
+      const publicId = `DT-${dateKey}-${String(counter.sequence).padStart(4, '0')}`;
       const result = this.db.prepare(`
-        INSERT INTO tasks (request, state, created_at, updated_at, owner_open_id)
-        VALUES (?, 'queued', ?, ?, ?)
-      `).run(request.trim(), timestamp, timestamp, ownerOpenId);
+        INSERT INTO tasks
+          (public_id, request, state, created_at, updated_at, owner_open_id, reply_chat_id, source_message_id)
+        VALUES (?, ?, 'queued', ?, ?, ?, ?, ?)
+      `).run(publicId, request.trim(), timestamp, timestamp, ownerOpenId, replyChatId, sourceMessageId);
       const taskId = Number(result.lastInsertRowid);
       this.recordEvent(taskId, 'queued', null);
       return this.getTask(taskId);
@@ -143,6 +179,7 @@ export class TaskStore {
 
       const assignments = ['state = ?', 'updated_at = ?'];
       const values = [nextState, now()];
+      if (nextState !== 'retrying') assignments.push('retry_after = NULL');
       if ('reason' in options) {
         assignments.push('reason = ?');
         values.push(options.reason ?? null);
@@ -172,6 +209,7 @@ export class TaskStore {
       if (TERMINAL_STATES.has(nextState)) {
         this.releaseLocks(task.id);
         this.clearVerification(task.id);
+        this.clearBrowserSession(task.id);
       }
       return this.getTask(task.id);
     });
@@ -213,9 +251,160 @@ export class TaskStore {
     });
   }
 
+  continueTask(taskId) {
+    const task = this.requireTask(taskId);
+    if (task.paused) {
+      const resumed = this.resume(task.id);
+      if (!resumed.ok || resumed.task.state !== 'waiting_for_user' || resumed.task.reason === VERIFICATION_REASON) {
+        return resumed;
+      }
+    } else if (task.state !== 'waiting_for_user') {
+      return { ok: false, code: 'not_paused', message: '任务未暂停或等待用户操作', task };
+    }
+    const queued = this.transition(task.id, 'queued', { reason: null });
+    return { ok: true, code: null, message: null, task: queued };
+  }
+
   // 中文注释：获取单个任务的当前公开状态。
   getTask(taskId) {
     return mapTask(this.db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId));
+  }
+
+  getTaskByPublicId(publicId) {
+    return mapTask(this.db.prepare('SELECT * FROM tasks WHERE public_id = ?').get(String(publicId ?? '').trim()));
+  }
+
+  getTaskByMulticaIssueId(issueId) {
+    return mapTask(this.db.prepare('SELECT * FROM tasks WHERE multica_issue_id = ?').get(String(issueId ?? '').trim()));
+  }
+
+  getTaskByReference(reference) {
+    if (typeof reference === 'string' && reference.trim().toUpperCase().startsWith('DT-')) {
+      return this.getTaskByPublicId(reference.trim().toUpperCase());
+    }
+    const numeric = Number(reference);
+    return Number.isSafeInteger(numeric) && numeric > 0 ? this.getTask(numeric) : null;
+  }
+
+  bindMulticaIssue(taskId, issueId) {
+    const id = String(issueId ?? '').trim();
+    if (!id) throw new Error('Multica issue ID 不能为空');
+    this.requireTask(taskId);
+    this.db.prepare(`UPDATE tasks SET multica_issue_id = ?, updated_at = ? WHERE id = ?`).run(id, now(), taskId);
+    return this.getTask(taskId);
+  }
+
+  setTaskKind(taskId, taskKind) {
+    const kind = String(taskKind ?? '').trim();
+    if (!['deterministic', 'complex', 'general'].includes(kind)) throw new Error(`未知任务类型：${kind}`);
+    this.requireTask(taskId);
+    this.db.prepare(`UPDATE tasks SET task_kind = ?, updated_at = ? WHERE id = ?`).run(kind, now(), taskId);
+    return this.getTask(taskId);
+  }
+
+  saveWorkerPlan(taskId, subtasks) {
+    this.requireTask(taskId);
+    if (!Array.isArray(subtasks) || subtasks.length === 0 || subtasks.length > 4) {
+      throw new Error('worker 计划必须包含 1~4 个子任务');
+    }
+    return this.writeTransaction(() => {
+      const existing = this.listTaskWorkers(taskId);
+      if (existing.length > 0) return existing;
+      const timestamp = now();
+      const insert = this.db.prepare(`
+        INSERT INTO task_workers
+          (task_id, subtask_id, state, title, instructions, capabilities, created_at, updated_at)
+        VALUES (?, ?, 'planned', ?, ?, ?, ?, ?)
+      `);
+      for (const subtask of subtasks) {
+        insert.run(
+          taskId,
+          String(subtask.id),
+          String(subtask.title),
+          String(subtask.instructions),
+          JSON.stringify(subtask.capabilities ?? {}),
+          timestamp,
+          timestamp
+        );
+      }
+      return this.listTaskWorkers(taskId);
+    });
+  }
+
+  getTaskWorker(workerRowId) {
+    return mapTaskWorker(this.db.prepare('SELECT * FROM task_workers WHERE id = ?').get(workerRowId));
+  }
+
+  listTaskWorkers(taskId) {
+    return this.db.prepare('SELECT * FROM task_workers WHERE task_id = ? ORDER BY id ASC')
+      .all(taskId).map(mapTaskWorker);
+  }
+
+  listActiveWorkerRuns() {
+    return this.db.prepare(`
+      SELECT * FROM task_workers
+      WHERE state IN ('dispatching', 'dispatched', 'running')
+      ORDER BY id ASC
+    `).all().map(mapTaskWorker);
+  }
+
+  markWorkerDispatching(workerRowId, { workerId, bindingPath } = {}) {
+    const worker = this.getTaskWorker(workerRowId);
+    if (!worker) throw new Error(`worker 记录 ${workerRowId} 不存在`);
+    if (!workerId || !bindingPath) throw new Error('worker 派发缺少 workerId 或 bindingPath');
+    this.db.prepare(`
+      UPDATE task_workers
+      SET worker_id = ?, binding_path = ?, state = 'dispatching', updated_at = ?
+      WHERE id = ? AND state = 'planned'
+    `).run(String(workerId), String(bindingPath), now(), workerRowId);
+    return this.getTaskWorker(workerRowId);
+  }
+
+  resetWorkerDispatch(workerRowId, { failureReason = null } = {}) {
+    const worker = this.getTaskWorker(workerRowId);
+    if (!worker) throw new Error(`worker 记录 ${workerRowId} 不存在`);
+    this.db.prepare(`
+      UPDATE task_workers
+      SET worker_id = NULL, binding_path = NULL, state = 'planned',
+        failure_reason = ?, updated_at = ?
+      WHERE id = ? AND state = 'dispatching'
+    `).run(failureReason, now(), workerRowId);
+    return this.getTaskWorker(workerRowId);
+  }
+
+  bindWorkerIssue(workerRowId, issueId) {
+    const id = String(issueId ?? '').trim();
+    if (!id) throw new Error('worker Multica issue ID 不能为空');
+    if (!this.getTaskWorker(workerRowId)) throw new Error(`worker 记录 ${workerRowId} 不存在`);
+    this.db.prepare(`
+      UPDATE task_workers SET multica_issue_id = ?, state = 'dispatched', updated_at = ? WHERE id = ?
+    `).run(id, now(), workerRowId);
+    return this.getTaskWorker(workerRowId);
+  }
+
+  transitionTaskWorker(workerRowId, nextState, { summary = null, failureReason = null } = {}) {
+    const worker = this.getTaskWorker(workerRowId);
+    if (!worker) throw new Error(`worker 记录 ${workerRowId} 不存在`);
+    const allowed = new Set(['planned', 'dispatching', 'dispatched', 'running', 'completed', 'failed', 'cancelled']);
+    if (!allowed.has(nextState)) throw new Error(`未知 worker 状态：${nextState}`);
+    this.db.prepare(`
+      UPDATE task_workers SET state = ?, summary = COALESCE(?, summary),
+        failure_reason = COALESCE(?, failure_reason), updated_at = ? WHERE id = ?
+    `).run(nextState, summary, failureReason, now(), workerRowId);
+    return this.getTaskWorker(workerRowId);
+  }
+
+  renewTaskWorkerRun(workerRowId, { bindingPath } = {}) {
+    const worker = this.getTaskWorker(workerRowId);
+    if (!worker) throw new Error(`worker 记录 ${workerRowId} 不存在`);
+    if (!String(bindingPath ?? '').trim()) throw new Error('worker 续跑缺少 bindingPath');
+    this.db.prepare(`
+      UPDATE task_workers
+      SET state = 'dispatched', binding_path = ?, summary = NULL,
+        failure_reason = NULL, updated_at = ?
+      WHERE id = ?
+    `).run(String(bindingPath), now(), workerRowId);
+    return this.getTaskWorker(workerRowId);
   }
 
   // 中文注释：列出所有未结束任务，含已暂停任务，供状态回执展示。
@@ -228,8 +417,34 @@ export class TaskStore {
   // 中文注释：列出可被调度器领取的任务，排除已暂停任务。
   listRunnableTasks() {
     return this.db.prepare(`
-      SELECT * FROM tasks WHERE paused = 0 AND state IN (${OPEN_STATES.map(() => '?').join(', ')}) ORDER BY id ASC
-    `).all(...OPEN_STATES).map(mapTask);
+      SELECT * FROM tasks
+      WHERE paused = 0 AND state IN (${OPEN_STATES.map(() => '?').join(', ')})
+        AND (state != 'retrying' OR retry_after IS NULL OR retry_after <= ?)
+      ORDER BY id ASC
+    `).all(...OPEN_STATES, now()).map(mapTask);
+  }
+
+  recoverInterruptedDeterministicTasks() {
+    return this.writeTransaction(() => {
+      const interrupted = this.db.prepare(`
+        SELECT id FROM tasks
+        WHERE paused = 0 AND state = 'running' AND task_kind = 'deterministic'
+        ORDER BY id ASC
+      `).all();
+      const recovered = [];
+      for (const row of interrupted) {
+        const timestamp = now();
+        this.db.prepare(`
+          UPDATE tasks
+          SET state = 'queued', reason = NULL, retry_after = NULL, updated_at = ?
+          WHERE id = ? AND paused = 0 AND state = 'running' AND task_kind = 'deterministic'
+        `).run(timestamp, row.id);
+        this.releaseLocks(row.id);
+        this.recordEvent(row.id, 'queued', '控制平面重启，按本机检查点重新排队');
+        recovered.push(this.getTask(row.id));
+      }
+      return recovered;
+    });
   }
 
   // 中文注释：列出已暂停任务，供"继续"命令在未指定编号时给出候选。
@@ -262,6 +477,145 @@ export class TaskStore {
 
   clearVerification(taskId) {
     this.db.prepare('DELETE FROM verification_waits WHERE task_id = ?').run(taskId);
+  }
+
+  saveBrowserSession(taskId, { websiteId, targetId, marker } = {}) {
+    this.requireTask(taskId);
+    const values = [websiteId, targetId, marker].map((value) => String(value ?? '').trim());
+    if (values.some((value) => !value)) throw new Error('浏览器会话缺少 websiteId、targetId 或 marker');
+    this.db.prepare(`
+      INSERT INTO task_browser_sessions (task_id, website_id, target_id, marker, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(task_id) DO UPDATE SET
+        website_id = excluded.website_id,
+        target_id = excluded.target_id,
+        marker = excluded.marker,
+        updated_at = excluded.updated_at
+    `).run(taskId, ...values, now());
+    return this.getBrowserSession(taskId);
+  }
+
+  getBrowserSession(taskId) {
+    return this.db.prepare(`
+      SELECT task_id AS taskId, website_id AS websiteId, target_id AS targetId,
+             marker, updated_at AS updatedAt
+      FROM task_browser_sessions WHERE task_id = ?
+    `).get(taskId) ?? null;
+  }
+
+  clearBrowserSession(taskId) {
+    this.db.prepare('DELETE FROM task_browser_sessions WHERE task_id = ?').run(taskId);
+  }
+
+  deliverVerificationCode(taskId, code, deliver) {
+    const task = this.requireTask(taskId);
+    if (task.state !== 'waiting_for_user' || task.reason !== VERIFICATION_REASON) {
+      throw new Error('任务当前不在等待验证码');
+    }
+    if (typeof deliver !== 'function') throw new Error('缺少验证码投递器');
+    const finish = (result) => {
+      if (result === false) return result;
+      this.clearVerification(task.id);
+      this.recordEvent(task.id, task.state, '验证码已通过内存通道交付');
+      return result;
+    };
+    const result = deliver(String(code ?? ''));
+    return result && typeof result.then === 'function' ? result.then(finish) : finish(result);
+  }
+
+  consumeCapabilityNonce({ nonceHash, taskPublicId, expiresAt }) {
+    try {
+      const result = this.db.prepare(`
+        INSERT INTO capability_nonces (nonce_hash, task_public_id, expires_at, consumed_at)
+        VALUES (?, ?, ?, ?)
+      `).run(nonceHash, taskPublicId, expiresAt, now());
+      return Number(result.changes) === 1;
+    } catch (error) {
+      if (/UNIQUE constraint failed: capability_nonces.nonce_hash/.test(String(error?.message ?? ''))) return false;
+      throw error;
+    }
+  }
+
+  claimInboundMessage({ messageId, senderOpenId, chatId }) {
+    const result = this.db.prepare(`
+      INSERT INTO inbound_messages (message_id, sender_open_id, chat_id, received_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(message_id) DO NOTHING
+    `).run(String(messageId), String(senderOpenId), String(chatId), now());
+    return Number(result.changes) === 1;
+  }
+
+  linkInboundMessage(messageId, taskId) {
+    this.requireTask(taskId);
+    this.db.prepare(`UPDATE inbound_messages SET task_id = ? WHERE message_id = ?`).run(taskId, String(messageId));
+  }
+
+  createTerminalReceipt(taskId, { summary, evidenceRefs = [] } = {}) {
+    const task = this.requireTask(taskId);
+    if (!TERMINAL_STATES.has(task.state)) throw new Error('任务尚未结束，不能创建终态回执');
+    const receiptSummary = String(summary ?? task.summary ?? task.reason ?? '').trim();
+    if (!receiptSummary) throw new Error('终态回执摘要不能为空');
+    const result = this.db.prepare(`
+      INSERT INTO terminal_receipts (task_id, state, summary, evidence_refs, created_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(task_id) DO NOTHING
+    `).run(task.id, task.state, receiptSummary, JSON.stringify(evidenceRefs), now());
+    return { created: Number(result.changes) === 1, receipt: this.getTerminalReceipt(task.id) };
+  }
+
+  getTerminalReceipt(taskId) {
+    const row = this.db.prepare(`
+      SELECT task_id AS taskId, state, summary, evidence_refs AS evidenceRefs,
+             created_at AS createdAt, sending_claimed_at AS sendingClaimedAt, sent_at AS sentAt
+      FROM terminal_receipts WHERE task_id = ?
+    `).get(taskId);
+    if (!row) return null;
+    return { ...row, evidenceRefs: JSON.parse(row.evidenceRefs) };
+  }
+
+  getLatestTerminalReceipt() {
+    const row = this.db.prepare(`SELECT task_id FROM terminal_receipts ORDER BY created_at DESC, task_id DESC LIMIT 1`).get();
+    return row ? this.getTerminalReceipt(row.task_id) : null;
+  }
+
+  claimTerminalReceiptForSending(taskId, { leaseMs = 60_000 } = {}) {
+    const timestamp = now();
+    const staleBefore = new Date(Date.now() - Math.max(1, Number(leaseMs))).toISOString();
+    const result = this.db.prepare(`
+      UPDATE terminal_receipts SET sending_claimed_at = ?
+      WHERE task_id = ? AND sent_at IS NULL
+        AND (sending_claimed_at IS NULL OR sending_claimed_at < ?)
+    `).run(timestamp, taskId, staleBefore);
+    return { claimed: Number(result.changes) === 1, receipt: this.getTerminalReceipt(taskId) };
+  }
+
+  releaseTerminalReceiptClaim(taskId) {
+    this.db.prepare(`UPDATE terminal_receipts SET sending_claimed_at = NULL WHERE task_id = ? AND sent_at IS NULL`).run(taskId);
+  }
+
+  markTerminalReceiptSent(taskId) {
+    this.db.prepare(`UPDATE terminal_receipts SET sent_at = ? WHERE task_id = ?`).run(now(), taskId);
+    return this.getTerminalReceipt(taskId);
+  }
+
+  listTerminalTasksWithoutReceipt() {
+    return this.db.prepare(`
+      SELECT t.* FROM tasks t
+      LEFT JOIN terminal_receipts r ON r.task_id = t.id
+      WHERE t.state IN ('completed', 'partial', 'failed', 'cancelled') AND r.task_id IS NULL
+      ORDER BY t.updated_at ASC, t.id ASC
+    `).all().map(mapTask);
+  }
+
+  listUnsentTerminalReceipts() {
+    return this.db.prepare(`
+      SELECT r.task_id AS taskId, r.state, r.summary, r.evidence_refs AS evidenceRefs,
+             r.created_at AS createdAt, r.sending_claimed_at AS sendingClaimedAt,
+             r.sent_at AS sentAt, t.public_id AS publicId, t.reply_chat_id AS replyChatId
+      FROM terminal_receipts r JOIN tasks t ON t.id = r.task_id
+      WHERE r.sent_at IS NULL
+      ORDER BY r.created_at ASC, r.task_id ASC
+    `).all().map((row) => ({ ...row, evidenceRefs: JSON.parse(row.evidenceRefs) }));
   }
 
   // 中文注释：原子获取资源锁。单条 upsert 取代 SELECT-then-INSERT（修 B12）。
@@ -322,6 +676,15 @@ export class TaskStore {
       this.db.prepare('UPDATE tasks SET attempt = attempt + 1, updated_at = ? WHERE id = ?').run(now(), taskId);
       return Number(this.db.prepare('SELECT attempt FROM tasks WHERE id = ?').get(taskId).attempt);
     });
+  }
+
+  scheduleRetry(taskId, { delaySeconds, reason = '瞬时失败，准备重试' } = {}) {
+    const delay = Number(delaySeconds);
+    if (!Number.isFinite(delay) || delay < 0) throw new Error('重试延迟必须是非负秒数');
+    const task = this.transition(taskId, 'retrying', { reason });
+    const retryAfter = new Date(Date.now() + delay * 1000).toISOString();
+    this.db.prepare(`UPDATE tasks SET retry_after = ?, updated_at = ? WHERE id = ?`).run(retryAfter, now(), task.id);
+    return this.getTask(task.id);
   }
 
   // 中文注释：保存任务检查点，供暂停后继续或重试时恢复上下文。
@@ -433,6 +796,81 @@ export class TaskStore {
     return this.getSetting(key);
   }
 
+  getMulticaPausedRuns(taskId) {
+    this.requireTask(taskId);
+    const raw = this.getSetting(`multica_paused_runs:${taskId}`);
+    if (!raw) return [];
+    try {
+      const rows = JSON.parse(raw);
+      if (!Array.isArray(rows)) return [];
+      return rows.filter((item) => item && typeof item.issueId === 'string' && typeof item.runId === 'string')
+        .map((item) => ({ issueId: item.issueId, runId: item.runId }));
+    } catch {
+      return [];
+    }
+  }
+
+  saveMulticaPausedRuns(taskId, runs) {
+    this.requireTask(taskId);
+    const unique = new Map();
+    for (const item of Array.isArray(runs) ? runs : []) {
+      const issueId = String(item?.issueId ?? '').trim();
+      const runId = String(item?.runId ?? '').trim();
+      if (issueId && runId) unique.set(issueId, { issueId, runId });
+    }
+    if (unique.size === 0) return this.clearMulticaPausedRuns(taskId);
+    this.setSetting(`multica_paused_runs:${taskId}`, JSON.stringify([...unique.values()]));
+    return [...unique.values()];
+  }
+
+  clearMulticaPausedRuns(taskId) {
+    this.db.prepare('DELETE FROM settings WHERE key = ?').run(`multica_paused_runs:${taskId}`);
+    return [];
+  }
+
+  listMulticaTerminalTasksPendingCleanup() {
+    return this.db.prepare(`
+      SELECT t.* FROM tasks t
+      LEFT JOIN settings s ON s.key = ('multica_terminal_cleanup:' || t.id)
+      WHERE t.task_kind = 'complex' AND t.multica_issue_id IS NOT NULL
+        AND t.state IN ('completed', 'partial', 'failed', 'cancelled')
+        AND s.key IS NULL
+      ORDER BY t.id ASC
+    `).all().map(mapTask);
+  }
+
+  markMulticaTerminalCleanupComplete(taskId) {
+    const task = this.requireTask(taskId);
+    this.setSetting(`multica_terminal_cleanup:${task.id}`, 'complete');
+    return true;
+  }
+
+  isMulticaTerminalCleanupComplete(taskId) {
+    const task = this.requireTask(taskId);
+    return this.getSetting(`multica_terminal_cleanup:${task.id}`) === 'complete';
+  }
+
+  saveWorkerCheckpoint(taskId, workerId, checkpoint) {
+    const task = this.requireTask(taskId);
+    const id = String(workerId ?? '').trim();
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(id)) throw new Error('worker ID 非法');
+    const value = { taskId: task.publicId, workerId: id, checkpoint, savedAt: now() };
+    this.setSetting(`worker_checkpoint:${task.id}:${id}`, JSON.stringify(value));
+    return value;
+  }
+
+  getWorkerCheckpoint(taskId, workerId) {
+    this.requireTask(taskId);
+    const id = String(workerId ?? '').trim();
+    const raw = this.getSetting(`worker_checkpoint:${taskId}:${id}`);
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+
   // 中文注释：写入执行验证证据。没有证据的任务不允许标记完成（见 execution-verifier）。
   insertExecutionEvidence({ taskId, kind, target = null, processId = null, processName = null, detail = null }) {
     this.requireTask(taskId);
@@ -451,12 +889,33 @@ export class TaskStore {
     `).all(taskId);
   }
 
+  getExecutionEvidence(evidenceId) {
+    const id = Number(evidenceId);
+    if (!Number.isSafeInteger(id) || id <= 0) return null;
+    return this.db.prepare(`
+      SELECT id, task_id AS taskId, kind, target, process_id AS processId,
+             process_name AS processName, detail, verified_at AS verifiedAt
+      FROM execution_evidence WHERE id = ?
+    `).get(id) ?? null;
+  }
+
   // 中文注释：Token 用量落库，供成本与缓存命中率分析（修 B16b）。
   recordTokenUsage(usage) {
     this.db.prepare(`
       INSERT INTO token_ledger
-        (task_id, worker_id, model, input_tokens, cached_tokens, output_tokens, cache_hit, latency_ms, estimated_cost, recorded_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (task_id, worker_id, model, input_tokens, cached_tokens, output_tokens, cache_hit,
+         latency_ms, estimated_cost, external_usage_id, recorded_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(task_id, external_usage_id) WHERE external_usage_id IS NOT NULL DO UPDATE SET
+        worker_id = excluded.worker_id,
+        model = excluded.model,
+        input_tokens = excluded.input_tokens,
+        cached_tokens = excluded.cached_tokens,
+        output_tokens = excluded.output_tokens,
+        cache_hit = excluded.cache_hit,
+        latency_ms = excluded.latency_ms,
+        estimated_cost = excluded.estimated_cost,
+        recorded_at = excluded.recorded_at
     `).run(
       usage.taskId,
       String(usage.workerId ?? 'local'),
@@ -467,6 +926,7 @@ export class TaskStore {
       usage.cacheHit ? 1 : 0,
       Number(usage.latencyMs ?? 0),
       usage.estimatedCost ?? null,
+      usage.usageId ? String(usage.usageId) : null,
       now()
     );
     return this.summarizeTokenUsage(usage.taskId);
@@ -479,7 +939,10 @@ export class TaskStore {
              COALESCE(SUM(cached_tokens), 0) AS cachedTokens,
              COALESCE(SUM(output_tokens), 0) AS outputTokens,
              COALESCE(SUM(cache_hit), 0) AS cacheHits,
-             COALESCE(SUM(estimated_cost), 0) AS estimatedCost
+             CASE
+               WHEN COUNT(*) = COUNT(estimated_cost) THEN COALESCE(SUM(estimated_cost), 0)
+               ELSE NULL
+             END AS estimatedCost
       FROM token_ledger WHERE task_id = ?
     `).get(taskId);
     return {
@@ -489,7 +952,7 @@ export class TaskStore {
       cachedTokens: Number(row.cachedTokens),
       outputTokens: Number(row.outputTokens),
       cacheHits: Number(row.cacheHits),
-      estimatedCost: Number(row.estimatedCost)
+      estimatedCost: row.estimatedCost === null ? null : Number(row.estimatedCost)
     };
   }
 }

@@ -1,101 +1,120 @@
 # Daily Digital Twin
 
-一个运行在 Windows 本机上的个人工作替身框架：手机通过飞书派发任务，本机在**已登录的浏览器会话**里执行网页操作，并用受限的应用目录启动桌面软件。源码公开，运行数据私有。
+一个运行在 Windows 本机上的个人工作替身：手机通过飞书发任务，简单动作由本机直接执行，复杂任务交给 Multica 拆分并由最多四个隔离的 Codex worker 处理。
 
-## 设计边界
+当前主链是 **飞书 + Daily Twin + Multica + Codex + Microsoft Playwright MCP**。OpenClaw 不参与新任务，只保留为迁移期间的回滚备份；新架构连续稳定运行 48 小时后才能停用旧自启动。
 
-- 本地不运行大模型；模型推理仍走你配置的兼容接口。云端只做计划，本机复核后才执行。
-- 最多四个任务槽；同一软件、文件或网页标签页互斥；桌面自动化同时只允许一个（前台独占）。
-- 验证码、登录弹窗和人工判断会暂停任务，验证码只在内存中传给当前页面，不落盘、不进回执。
-- 删除、覆盖、上传、付款、发送和公开发布仍需人工确认。
-- **执行必须留证。** 没有进程 / 窗口 / 页面 / 文件四类证据之一，任务只会被判为 `partial`，绝不谎报 `completed`。
-- 飞书身份采用**首次配对即绑定**：第一个发消息的人成为主人，之后其他人一律拒绝。
+## 它怎样工作
 
-## 浏览器：先读这一节
+```text
+飞书消息
+   |
+   v
+Daily Twin 本机控制平面 ---- 状态 / 暂停 / 继续 / 取消 / 看证据
+   |
+   +---- 固定流程：Biomni / Omicos ------------------ 0 Token
+   |
+   +---- 复杂任务 -> Multica planner -> 1~4 个 Codex worker
+                                      |
+                                      v
+                         Daily Twin 高层 MCP 工具
+                         Edge / 已登记软件 / 检查点
+```
 
-README 的旧版本写着"Edge 浏览器动作通过 OpenClaw 已配对的 `chrome` profile 执行"，**这句话是错的**。
+- 每条普通任务立即获得 `DT-日期-序号`，最终只发送一条终态回执。
+- `状态` 等控制命令、本机软件启动和固定网站流程不调用模型。
+- planner 只输出最多四个结构化子任务，退出后才启动 worker，不和 worker 抢槽。
+- worker 只能调用 `browser_open/fill/submit/wait/capture`、`app_launch`、`task_checkpoint` 和 `task_checkpoint_read`，不能获得 Shell 或整机控制。
+- Edge 未连接、登录过期、验证码或任务标签失去归属时进入 `waiting_for_user`，绝不静默改用 Chrome。
+- 任务标签标记和检查点保存在本机 SQLite；控制平面重启会把中断的固定流程重新排队，再按完全相等的 `window.name` 定位原 Edge 标签，不重复提交已有检查点记录的动作。
+- 没有真实页面、进程、窗口或文件证据时，任务不能报告 `completed`。
 
-OpenClaw 内置的 `chrome` profile 按定义就是 Chrome 扩展（`driver: "extension"`），本地启动的自动探测顺序是
-Chrome → Brave → Edge → Chromium → Chrome Canary。也就是说 `--browser-profile chrome` 命中的是 Chrome，不是 Edge。
+## 本机安全边界
 
-三条可用路线的完整对比、各自的前置条件，以及"没人在电脑前"时哪一条真的成立，见
-[`docs/BROWSER-PROFILES.md`](docs/BROWSER-PROFILES.md)。默认配置走 `openclaw` 托管 profile（可无人值守，代价是首次要在替身专用浏览器里单独登录一次）。
+- 能力票绑定 `task_id`、Multica issue、worker、允许的网站/软件/目录/动作、过期时间和一次性 nonce，并由本机 HMAC 签名。
+- 能力票在 MCP 启动时消费，篡改、过期、重放或越权调用都会失败。
+- 验证码只进入内存 broker，不进入 Multica、模型、SQLite、日志、缓存或回执；截图会临时遮罩私有应用目录登记的验证码输入框，并在截图成功或失败后恢复页面样式。
+- 飞书 App Secret、能力票密钥、模型 Key、Multica PAT、真实软件路径、截图和 Token 账本只放在 `DAILY_TWIN_HOME`。
+- Codex worker 固定为 `workspace-write + approval_policy=never`：授权范围内自动执行，范围外直接拒绝，不弹出远程审批。
+- 控制平面与遥测都有单实例锁，避免重复计划任务同时运行。
+- 所有终态文字回执在发送前统一脱敏；人工登录和验证码等待不消耗三次瞬时错误重试额度。
+
+## 资源和 Token
+
+重型 worker 数量按本机压力动态收缩：
+
+| 条件 | 重型 worker 上限 |
+|---|---:|
+| 可用内存 `>= 10 GB` 且 CPU `< 55%` | 4 |
+| 可用内存 `6~10 GB` | 2 |
+| 可用内存 `4~6 GB` | 1 |
+| 可用内存 `< 4 GB`、D 盘不足 20 GB 或遥测缺失 | 0 |
+| 电池模式 | 最多 1 |
+
+网页等待、软件计算和任务排队不要求模型进程持续占用资源。超过 90 分钟的 worker 只有保存了本轮新检查点才会重签能力票并续跑；否则停止并如实失败。Token 账本按任务和 worker 记录输入、缓存输入、输出、延迟和本地估价；缓存 Token 视为输入 Token 的子集，只按缓存费率计一次。Multica 聚合用量按 issue 更新快照，未知模型价格保持为空，不猜中转站费用。
 
 ## 目录
 
 ```text
-src/core/            公开任务内核、策略与路由
-src/runtime.mjs      命令行入口
-platform/windows/    Windows 启动、遥测、备份与修复脚本
-config/*.example.*   脱敏示例配置
-docs/                运行手册、浏览器路线、架构、缺陷修复记录
-test/                Node 内置测试
-scripts/             隐私审计
+src/core/             状态、资源、能力票、Token、单实例锁
+src/gateway/          飞书 WebSocket、验证码、回执和证据发送
+src/execution/        固定网页流程与 Windows 软件执行
+src/integrations/     Multica、Codex worker、Playwright Edge
+src/mcp/              只暴露高层本机工具的 stdio MCP
+platform/windows/     遥测、计划任务、切换和回滚脚本
+config/*.example.*    不含真实路径或密钥的示例
+test/                 Node 和跨语言契约测试
 ```
 
-私有实例放在本机的 `DAILY_TWIN_HOME` 目录，其中的 `data/`、`config/runtime.json`、截图、日志、浏览器会话和真实应用路径都不进入本仓库。
+公开仓与私有实例必须分开。私有实例由 `DAILY_TWIN_HOME` 指定；没有配置时运行时直接失败，不回退到仓库目录。
 
-## 私有目录是必填项
+## 开始部署
 
-`DAILY_TWIN_HOME` **没有仓库内的兜底路径**。没配置时命令行会直接以退出码 1 失败并给出设置方法，而不是偷偷把运行数据写在公开仓库旁边（这是本轮修掉的 B13b/B14）。
-
-```powershell
-# 建议放在 D 盘，避免占满系统盘
-# 注意参数名是 -PrivateHome 而不是 -Home：$Home 是 PowerShell 自动变量，占用它就是 B18 那类缺陷
-.\platform\windows\Set-DailyTwinPaths.ps1 -PrivateHome 'D:\DailyTwin\home'
-```
-
-完整的开机到日常运维步骤见 [`docs/RUNBOOK.md`](docs/RUNBOOK.md)。
-
-## 开发
-
-需要 Node.js 24 或更高版本（用到 `node:sqlite`）。零运行时依赖，不需要 `npm install`。
+需要 Windows 11、Node.js 24、PowerShell 7、Multica CLI，以及已安装 Playwright Extension 的日常 Edge。
 
 ```powershell
-npm test              # 132 条单元测试
-npm run audit:privacy # 隐私审计：密钥、真实本机路径、中转地址
-npm run smoke         # CLI 冒烟：端到端行为，含"不该产生的副作用"
-npm run check         # 上面三条一起跑，提交前必须绿
-```
-
-Windows 侧另有两条（需要 pwsh）：
-
-```powershell
-npm run lint:ps       # 语法解析 + BOM 检查 + PSScriptAnalyzer
-npm run selftest:ps   # 脚本层运行时自检
-```
-
-改造过程中确认并修掉的 24 个缺陷，逐条对应到代码位置和守它的测试，见
-[`docs/BUGFIX-LOG.md`](docs/BUGFIX-LOG.md)。整体设计与取舍见
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)（英文）。
-
-初始化私有运行目录并创建任务：
-
-```powershell
-$env:DAILY_TWIN_HOME = 'D:\DailyTwin\home'
+npm ci
+$env:DAILY_TWIN_HOME = 'D:\DailyTwin'
 npm run runtime -- init
-npm run runtime -- create '打开 Biomni，在输入框输入 TEST_TEXT'
-npm run runtime -- status
-npm run runtime -- doctor    # 检查库、迁移版本、遥测与磁盘
 ```
 
-## 调度器默认休眠
+然后在私有目录中完成：
 
-`scheduler.enabled` 默认 `false`。装好之后替身**不会**自己开始跑任务，必须显式开启：
+1. 把 `config/runtime.example.json` 合并到 `config/runtime.json`，填写飞书 App ID、允许的 open ID 和已核验的本机命令路径。
+2. 把真实飞书 App Secret 写入 `config/feishu-app-secret.secret`。
+3. 把 `config/apps.example.json` 复制为私有 `config/apps.json`，逐个核验软件路径、进程名、窗口条件和网页选择器。
+4. 按 [Multica agent 示例](config/multica-agents.example.md) 建一个 planner 和四个固定 worker slot。
+5. 在 Edge 安装并配对 Microsoft Playwright Extension。
+6. 先预览、再注册三个当前用户计划任务：
 
 ```powershell
-npm run runtime -- scheduler status
+.\platform\windows\Install-DailyTwinServices.ps1 -PrivateHome $env:DAILY_TWIN_HOME -WhatIf
+.\platform\windows\Install-DailyTwinServices.ps1 -PrivateHome $env:DAILY_TWIN_HOME
 npm run runtime -- scheduler enable
 ```
 
-资源策略是 fail-closed 的：拿不到 CPU 占用和是否接电源，就判定为"遥测缺失"，槽位归零、不接新动作。
-Windows 上由 `platform/windows/Write-DailyTwinTelemetry.ps1` 定期写入 `data/telemetry.json`；
-调试时也可以用 `DAILY_TWIN_CPU_PERCENT` 和 `DAILY_TWIN_ON_AC_POWER` 两个环境变量临时覆盖。
+完整步骤、验收和回滚见 [运行手册](docs/RUNBOOK.md)，模块边界见 [架构说明](docs/ARCHITECTURE.md)。
 
-## 不要提交的东西
+## 开发与验证
 
-真实 API Key、飞书 App Secret、网关 token、模型中转地址、Cookie、含真实 Windows 用户名的绝对路径、
-任务截图、个人研究材料、`data/` 下的任何运行数据。`npm run audit:privacy` 会在提交前拦一道，CI 里也会再跑一次。
+```powershell
+npm ci
+npm test
+npm run audit:privacy
+npm run lint:ps
+npm run selftest:ps
+```
 
-审计规则对"用户目录 + 真实用户名"这种形态是零容忍的，连文档里的示例都不放过 —— 这是故意的：
-上一版审计因为没有处理源码里的双反斜杠转义，真的漏掉过一个真实用户名。
+CLI 冒烟测试在 Git Bash 中运行：
+
+```bash
+bash .github/scripts/cli-smoke.sh
+```
+
+这些测试能证明代码契约、迁移、权限和脚本行为；它们不能代替真实飞书账号、Multica 账号、Edge 扩展和已安装桌面软件的本机端到端验收。
+
+## 永远不要提交
+
+API Key、PAT、飞书 App Secret、Cookie、验证码、真实 Windows 用户目录、真实软件路径、任务文字、截图、下载文件、浏览器资料、运行数据库、日志和 Token 账本。提交前和 CI 都会运行 `npm run audit:privacy`。
+
+许可证：[MIT](LICENSE)

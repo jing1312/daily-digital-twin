@@ -3,7 +3,10 @@
 
 export const DEFAULT_RESOURCE_LIMITS = {
   cpuLimitPercent: 55,
-  minAvailableMemoryGb: 8,
+  minAvailableMemoryGb: 4,
+  fourSlotMemoryGb: 10,
+  twoSlotMemoryGb: 6,
+  oneSlotMemoryGb: 4,
   minDiskFreeGb: 20,
   batterySlotLimit: 1,
   maxSlots: 4
@@ -28,8 +31,18 @@ export function decideResourcePolicy(telemetry = {}, limits = DEFAULT_RESOURCE_L
     return { slotLimit: 0, acceptsNewActions: false, reason: '资源不足' };
   }
 
+  let memorySlots = 1;
+  if (reading.availableMemoryGb >= effective.fourSlotMemoryGb) memorySlots = 4;
+  else if (reading.availableMemoryGb >= effective.twoSlotMemoryGb) memorySlots = 2;
+  else if (reading.availableMemoryGb >= effective.oneSlotMemoryGb) memorySlots = 1;
+
+  memorySlots = Math.min(memorySlots, effective.maxSlots);
   if (!reading.onAcPower) {
-    return { slotLimit: effective.batterySlotLimit, acceptsNewActions: true, reason: '电池模式' };
+    return { slotLimit: Math.min(memorySlots, effective.batterySlotLimit), acceptsNewActions: true, reason: '电池模式' };
   }
-  return { slotLimit: effective.maxSlots, acceptsNewActions: true, reason: null };
+  return {
+    slotLimit: memorySlots,
+    acceptsNewActions: true,
+    reason: memorySlots === effective.maxSlots ? null : `内存档位：${memorySlots} 个重型槽`
+  };
 }
