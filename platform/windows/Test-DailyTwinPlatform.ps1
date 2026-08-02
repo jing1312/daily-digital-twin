@@ -108,6 +108,31 @@ try {
     try { ConvertFrom-DailyTwinJson -Path (Join-Path $workRoot 'missing.json') | Out-Null } catch { $threw = $true }
     Write-DailyTwinCheck -Name '文件不存在时抛错' -Condition $threw
 
+    Write-Output '--- JSON 深度（ConvertTo-Json 的 -Depth 默认只有 2，写别人的真实配置时会静默截断）---'
+    Write-DailyTwinCheck -Name '标量深度是 0' -Condition ((Get-DailyTwinJsonDepth -InputObject 'text') -eq 0)
+    Write-DailyTwinCheck -Name 'null 深度是 0' -Condition ((Get-DailyTwinJsonDepth -InputObject $null) -eq 0)
+    Write-DailyTwinCheck -Name '平铺对象深度是 1' -Condition ((Get-DailyTwinJsonDepth -InputObject ([pscustomobject]@{ a = 1 })) -eq 1)
+    Write-DailyTwinCheck -Name '数组本身算一层' -Condition ((Get-DailyTwinJsonDepth -InputObject ([pscustomobject]@{ a = @(@{ b = 1 }) })) -eq 3)
+    Write-DailyTwinCheck -Name '日期是标量不是属性袋' -Condition ((Get-DailyTwinJsonDepth -InputObject ([DateTime]::UtcNow)) -eq 0)
+
+    $deepText = '{"a":{"b":{"c":{"d":{"e":{"f":{"g":{"h":"keep"}}}}}}}}'
+    $deepObject = $deepText | ConvertFrom-Json
+    Write-DailyTwinCheck -Name '八层嵌套量出来就是 8' -Condition ((Get-DailyTwinJsonDepth -InputObject $deepObject) -eq 8) -Detail "得到：$(Get-DailyTwinJsonDepth -InputObject $deepObject)"
+
+    # 中文注释：反向对照 —— 用旧的固定 -Depth 6 序列化同一个对象，必须能被截断检测抓到。
+    $truncatedText = $deepObject | ConvertTo-Json -Depth 6 -Compress -WarningAction SilentlyContinue
+    Write-DailyTwinCheck -Name '固定深度 6 确实会截断（反向对照）' -Condition (Test-DailyTwinJsonTruncated -Text $truncatedText) -Detail $truncatedText
+    Write-DailyTwinCheck -Name '正常 JSON 文本不误报截断' -Condition (-not (Test-DailyTwinJsonTruncated -Text '{"p":"D:\\DailyTwin\\workspace","n":[1,2]}'))
+    Write-DailyTwinCheck -Name '空文本不误报截断' -Condition (-not (Test-DailyTwinJsonTruncated -Text ''))
+
+    $deepPath = Join-Path $workRoot 'deep.json'
+    Write-DailyTwinJsonFile -Path $deepPath -InputObject $deepObject
+    $deepBack = ConvertFrom-DailyTwinJson -Path $deepPath
+    Write-DailyTwinCheck -Name '八层嵌套写盘再读回来一字不差' -Condition ($deepBack.a.b.c.d.e.f.g.h -eq 'keep') -Detail (Get-Content -Raw -LiteralPath $deepPath)
+    Write-DailyTwinCheck -Name '写出的文件里没有截断特征串' -Condition (-not (Test-DailyTwinJsonTruncated -Text (Get-Content -Raw -LiteralPath $deepPath)))
+    Write-DailyTwinCheck -Name '调用方要求更大深度时不会被压小' -Condition ((Resolve-DailyTwinJsonDepth -InputObject ([pscustomobject]@{ a = 1 }) -Minimum 20) -eq 20)
+    Write-DailyTwinCheck -Name '深度上限是 100' -Condition ((Resolve-DailyTwinJsonDepth -InputObject ([pscustomobject]@{ a = 1 }) -Minimum 500) -eq 100)
+
     Write-Output '--- Resolve-DailyTwinHome（不允许退回仓库目录）---'
     $homeA = Join-Path $workRoot 'home-a'
     $homeB = Join-Path $workRoot 'home-b'
