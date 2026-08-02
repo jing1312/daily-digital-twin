@@ -155,3 +155,69 @@ test('升级后旧任务仍可正常流转，并能记录新字段', () => {
     store.close();
   });
 });
+
+// 中文注释：B31 —— 回填 public_id 之后，daily_task_counters 必须跳过已经用掉的序号。
+//           修复前：回填把旧任务写成 DT-<今天>-0001，但计数器表仍然是空的，
+//           createTask 于是从 1 重新发号，撞上 tasks_public_id 唯一索引。
+//           而 createTask 整个包在 writeTransaction 里，撞索引会整笔回滚、
+//           计数器永远不前进 —— 表现是"迁移之后当天再也建不了任务"，
+//           不是"重试几次就好"。所以这条断言的是"能建"，而不是"报错友好"。
+//           时序前提：旧任务的 created_at 与随后的 createTask 落在同一个 UTC 日期。
+//           createLegacyDatabase 用的就是 new Date()，整条测试跑完只要几十毫秒。
+test('B31：回填 public_id 后计数器跳过已用序号，迁移当天仍能建新任务', () => {
+  withTempDatabase((path) => {
+    createLegacyDatabase(path).close();
+    const store = new TaskStore(path);
+
+    const legacyTask = store.listActiveTasks()[0];
+    assert.match(legacyTask.publicId, /^DT-\d{8}-0001$/, '回填应从 0001 开始');
+    const dateKey = legacyTask.publicId.slice(3, 11);
+
+    const counter = store.db
+      .prepare('SELECT next_value FROM daily_task_counters WHERE date_key = ?')
+      .get(dateKey);
+    assert.ok(counter, '回填后必须写入当天的计数器行，不能留一张空表');
+    assert.equal(counter.next_value, 2, '下一个可用序号应为 2');
+
+    // 中文注释：这一句在修复前抛 UNIQUE constraint failed: tasks.public_id。
+    assert.equal(store.createTask({ request: '迁移之后的新任务' }).publicId, `DT-${dateKey}-0002`);
+    // 中文注释：再建一个，确认计数器是真的在前进，而不是每次都靠 MAX 兜一下。
+    assert.equal(store.createTask({ request: '再来一个' }).publicId, `DT-${dateKey}-0003`);
+
+    store.close();
+  });
+});
+
+// 中文注释：B31b —— 反向对照。库里已经有更靠前的计数器时，同步必须用 MAX 合并，
+//           不能把计数器往回压（否则修好一个洞、又开一个）。
+//           注意：不能靠"重新打开一次 TaskStore"来触发同步 —— migrate 在
+//           fromVersion >= SCHEMA_VERSION 时会提前返回，回填根本不会跑，那样这条测试
+//           会是假绿灯。所以这里手工造出"计数器已发到 900、旧任务还没有 public_id、
+//           schema_version 仍低于当前版本"的库形状，并断言 migrated === true。
+test('B31b：已有更靠前的计数器时，回填同步必须用 MAX 合并而不是往回压', () => {
+  withTempDatabase((path) => {
+    const legacy = createLegacyDatabase(path);
+    legacy.exec(`
+      CREATE TABLE daily_task_counters (
+        date_key TEXT PRIMARY KEY,
+        next_value INTEGER NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `);
+    const dateKey = new Date().toISOString().slice(0, 10).replaceAll('-', '');
+    legacy
+      .prepare('INSERT INTO daily_task_counters (date_key, next_value, updated_at) VALUES (?, 900, ?)')
+      .run(dateKey, new Date().toISOString());
+    legacy.close();
+
+    const store = new TaskStore(path);
+    assert.equal(store.migration.migrated, true, '这个库必须真的跑过一次迁移，否则本条什么都没测到');
+    assert.equal(
+      store.db.prepare('SELECT next_value FROM daily_task_counters WHERE date_key = ?').get(dateKey).next_value,
+      900,
+      '同步必须用 MAX 合并，不能把 900 压回 2'
+    );
+    assert.equal(store.createTask({ request: '第 900 号' }).publicId, `DT-${dateKey}-0900`);
+    store.close();
+  });
+});
