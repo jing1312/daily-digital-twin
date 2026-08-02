@@ -60,7 +60,11 @@ data/workers  data/locks  backups
 
 - `browser.defaultBrowser` 必须是 `msedge`，`extension` 必须是 `true`。
 - `integrations.feishu.appId` 填真实 App ID。
-- `integrations.feishu.allowedOpenIds` 建议只放主人账号；留空时仍会使用首次配对绑定。
+- `integrations.feishu.allowedOpenIds` 只放主人账号。**留空不再等于放行所有人**：
+  名单为空且库里还没有归属账号时，网关一律拒绝并在日志里写下被拒的发送者（open_id 掩码显示）。
+- `integrations.feishu.allowFirstPairing` 默认 `false`。第一次配对时临时设为 `true`，
+  从手机发一条消息完成绑定，然后立刻改回 `false`。绑定之后即使名单留空也只认那个账号，
+  所以不需要为了能用而长期把它开着。跑过 `runtime owner reset` 之后要重新配对一次。
 - `integrations.multica.plannerAgent` 使用 `dt-planner`。
 - `workerAgents` 使用 `dt-worker-1` 到 `dt-worker-4`。
 - `allowedDirectories` 默认保持 `[]`，确需文件任务时才逐个加入绝对根目录。

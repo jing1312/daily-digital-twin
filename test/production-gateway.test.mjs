@@ -36,8 +36,12 @@ test('同一 message_id 重推不会重复建任务、回复或派发', async ()
   const store = new TaskStore(':memory:');
   const replies = [];
   let dispatches = 0;
+  // 中文注释：这里必须显式给出允许名单。原来不传 allowedOpenIds 也能跑通，是因为
+  //           网关"名单为空 => 放行所有人"，也就是把 B32 那个洞编码进了测试。
+  //           断言意图（去重、只回一次、只派发一次）完整保留，只是补上身份前提。
   const handler = createFeishuEventHandler({
     store,
+    allowedOpenIds: ['ou_owner'],
     sendText: async (chatId, text) => replies.push({ chatId, text }),
     dispatchTask: async () => { dispatches += 1; return { issueId: 'MUL-1' }; }
   });
@@ -178,4 +182,116 @@ test('飞书图片发送先上传本机 Buffer，再用 image_key 发消息', as
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+// 中文注释：B32 —— 允许名单为空时必须失败关闭。
+//   修复前 `src/gateway/feishu-websocket.mjs` 是
+//   `allowedOpenIds.length > 0 ? new Set(...) : null`，null 就跳过过滤；
+//   而 DEFAULT_CONFIG 和 config/runtime.example.json 里这个字段都是 []，
+//   所以按默认配置起服务时，任何能把消息投进那个会话的人都能驱动这台电脑。
+//   下游 authorizeSender/claimOwner 只挡得住"归属账号绑定之后"的人，
+//   挡不住首次配对之前的抢占窗口 —— 新库刚起、或刚跑过 runtime owner reset 时都存在。
+test('B32：名单为空且未绑定归属账号时，网关必须拒绝所有人', async () => {
+  const store = new TaskStore(':memory:');
+  const replies = [];
+  const warnings = [];
+  const handler = createFeishuEventHandler({
+    store,
+    allowedOpenIds: [],
+    sendText: async (chatId, text) => replies.push({ chatId, text }),
+    logger: { warn: (entry) => warnings.push(entry), error() {} }
+  });
+
+  const handled = await handler(textEvent({ openId: 'ou_stranger' }));
+  assert.equal(handled.ignored, true);
+  assert.equal(handled.reason, 'allowlist_empty');
+  assert.equal(store.db.prepare('SELECT COUNT(*) AS count FROM tasks').get().count, 0, '不得建任务');
+  assert.equal(replies.length, 0, '不得回复陌生人，避免确认这台机器存在');
+  assert.equal(store.getOwner(), null, '不得让陌生人抢到归属账号');
+  assert.equal(warnings.length, 1, '必须在本机日志里留下被拒记录');
+  assert.equal(warnings[0].reason, 'allowlist_empty');
+  assert.equal(warnings[0].senderOpenId, 'ou_s***', 'open_id 按仓库惯例掩码，不写全值');
+  store.close();
+});
+
+// 中文注释：B32b —— 首次配对开关是唯一的放行途径，而且必须是显式打开的。
+//           打开它就能逐字恢复 PR #2 原来的行为，所以这一版改的是默认值，不是能力。
+test('B32b：显式打开 allowFirstPairing 后，首次配对仍然可用', async () => {
+  const store = new TaskStore(':memory:');
+  const warnings = [];
+  const handler = createFeishuEventHandler({
+    store,
+    allowedOpenIds: [],
+    allowFirstPairing: true,
+    sendText: async () => {},
+    logger: { warn: (entry) => warnings.push(entry), error() {} }
+  });
+
+  const handled = await handler(textEvent({ openId: 'ou_owner' }));
+  await handled.background;
+  assert.equal(handled.ignored, undefined, '配对窗口开着时必须放行');
+  assert.equal(store.getOwner(), 'ou_owner', '首次发送者应完成绑定');
+  assert.equal(warnings[0].event, 'feishu_first_pairing_open', '开着窗口必须每条都吵一次');
+  store.close();
+});
+
+// 中文注释：B32c —— 绑定完成之后，名单留空也只认那个账号，而且要在网关层就挡掉别人：
+//           不让陌生人走到"认领消息"和"收到回复"这两步。
+//           这也是为什么用户不必为了能用而长期把 allowFirstPairing 开着。
+test('B32c：已绑定归属账号后，名单留空也只认那个账号，且在网关层就挡掉', async () => {
+  const store = new TaskStore(':memory:');
+  store.claimOwner('ou_owner');
+  const replies = [];
+  const handler = createFeishuEventHandler({
+    store,
+    allowedOpenIds: [],
+    sendText: async (chatId, text) => replies.push({ chatId, text }),
+    logger: { warn() {}, error() {} }
+  });
+
+  const stranger = await handler(textEvent({ messageId: 'om_x', openId: 'ou_stranger' }));
+  assert.equal(stranger.ignored, true);
+  assert.equal(stranger.reason, 'sender_not_owner');
+  assert.equal(replies.length, 0, '陌生人不该收到"只接受首次配对账号"这种回复');
+  assert.equal(
+    store.db.prepare('SELECT COUNT(*) AS count FROM inbound_messages').get().count, 0,
+    '陌生人的消息不该被认领，否则主人重发同一 message_id 会被判重复'
+  );
+
+  const owner = await handler(textEvent({ messageId: 'om_y', openId: 'ou_owner' }));
+  await owner.background;
+  assert.equal(owner.ignored, undefined, '主人必须仍然能用');
+  store.close();
+});
+
+// 中文注释：B32d —— 名单里混进空串或空白时不能被算成"名单非空"，
+//           否则一个写歪的配置又会退回放行所有人。
+test('B32d：名单里只有空串时视为空名单，不得放行', async () => {
+  const store = new TaskStore(':memory:');
+  const handler = createFeishuEventHandler({
+    store,
+    allowedOpenIds: ['', '   '],
+    sendText: async () => {},
+    logger: { warn() {}, error() {} }
+  });
+  const handled = await handler(textEvent({ openId: 'ou_stranger' }));
+  assert.equal(handled.reason, 'allowlist_empty');
+  store.close();
+});
+
+// 中文注释：B32e —— 名单非空时行为与修复前完全一致，不能顺手改坏。
+test('B32e：名单非空时只认名单，行为与修复前一致', async () => {
+  const store = new TaskStore(':memory:');
+  const handler = createFeishuEventHandler({
+    store,
+    allowedOpenIds: ['ou_owner'],
+    sendText: async () => {},
+    logger: { warn() {}, error() {} }
+  });
+  const blocked = await handler(textEvent({ messageId: 'om_a', openId: 'ou_stranger' }));
+  assert.equal(blocked.reason, 'sender_not_allowed');
+  const allowed = await handler(textEvent({ messageId: 'om_b', openId: 'ou_owner' }));
+  await allowed.background;
+  assert.equal(allowed.ignored, undefined);
+  store.close();
 });

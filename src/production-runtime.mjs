@@ -290,6 +290,7 @@ export async function buildProductionRuntime({
       taskLifecycle: multicaBridge,
       sendEvidence: (chatId, evidence) => localEvidenceSender(evidence, { chatId }),
       allowedOpenIds: config.integrations.feishu.allowedOpenIds,
+      allowFirstPairing: config.integrations.feishu.allowFirstPairing,
       logger
     });
     const receiptPump = createTerminalReceiptPump({
