@@ -282,6 +282,55 @@
 
 ---
 
+## B25 `Write-DailyTwinJsonFile` 会静默截断嵌套较深的 JSON
+
+**来源：** PR #1（`feat/browser-route-c`）。这条是从那个分支里**单独摘出来**的：
+它是 PR #1 里唯一一个与浏览器路线无关、却会弄坏用户真实数据的公共层缺陷，
+所以先单独进主线，不必等整条浏览器路线的结论。
+洞是在写 `Set-OpenClawBrowserProfile.ps1`（那个脚本要改写用户真实的 `openclaw.json`）时暴露的。
+
+`ConvertTo-Json` 的 `-Depth` 默认只有 2，超出的层级不会报错，而是被写成
+`"@{a=1}"` 这样的字符串。`DailyTwin.Common.ps1` 里的 `Write-DailyTwinJsonFile`
+原本固定给 `-Depth 6`——比默认好，但仍然是一个**猜出来的常数**。
+一旦被写的对象比这个常数深，写盘过程一声不吭，
+用户拿到的是一个能解析、但语义已经坏掉的配置。
+
+**严重程度是实测的，不是估的。** 用新加的 `Get-DailyTwinJsonDepth` 量过仓库现有的配置样例：
+`config/runtime.example.json` 实测**深度 3**，用旧的固定 `-Depth 6` 序列化**不会**被截断。
+所以对目前随仓库发布的配置来说，这是一个**尚未触发的潜在缺陷**，不是正在冒烟的故障。
+真正的残余风险在 `Write-DailyTwinTelemetry.ps1`：它序列化的是 CIM 查询回来的对象，
+深度由 Windows 决定、不由我们控制，那才是这个固定常数最可能先崩的地方。
+
+修法（在公共层修，四个调用方一起受益）：
+
+1. 新增 `Get-DailyTwinJsonDepth` —— 递归量出对象的实际嵌套深度。
+   哈希表、数组、普通属性袋各算一层；字符串和值类型算 0 层；递归自带 100 层熔断。
+   实现上必须用 `ArrayList.Add` 逐个装子节点：走管道的话数组会被 PowerShell 展开，
+   "数组也占一层"就量不出来了（这一条是写完第一版后被自检里的断言抓出来的）。
+2. 新增 `Resolve-DailyTwinJsonDepth` —— 实测深度 **+2** 的余量，不低于调用方要求的值，
+   上限 100（`ConvertTo-Json` 自己的上限）。
+3. 新增 `Test-DailyTwinJsonTruncated` —— 检查序列化结果里有没有 `"@{`、
+   `"System.Collections.Hashtable"`、`"System.Object[]"`、
+   `"System.Management.Automation.PSCustomObject"` 这四个截断特征串。
+   `Write-DailyTwinJsonFile` 序列化完一旦检出就**抛错，不写盘**。
+4. `Write-DailyTwinResult` 也改成按实测深度序列化：回执一般很浅，
+   但 `changes` / `blockers` 这类"数组套对象"也能到 4~5 层。
+
+回归断言（`Test-DailyTwinPlatform.ps1` 新增 13 条，脚本层自检总数 **33 → 46**）：
+量深度的边界（标量 0、`null` 0、平铺对象 1、数组自己算一层、`DateTime` 算标量）、
+8 层嵌套量出来必须是 8、8 层写盘再读回来一字不差、
+写出的文件里没有特征串、调用方要求的更大深度不被压小、上限确实是 100。
+其中最关键的一条是**反向对照**：拿同一个 8 层对象用旧的固定 `-Depth 6` 序列化，
+断言截断检测**确实**能抓到它——否则这套守卫可能只是全绿，而没在测任何东西。
+
+**这一次没有一起带过来的部分（仍留在 PR #1 里）：**
+`Set-OpenClawBrowserProfile.ps1` 落盘后读回来核对、任何一项不对就用备份原地还原的那一段，
+以及跑一遍完整 `-Apply` 再断言 8 层原有配置无损的端到端回归。
+那两段依赖 PR #1 的 OpenClaw 配置脚本本身，而这个分支里没有那个脚本；
+所以也就不该写进日志——否则这份日志会描述一件仓库树里并不存在的事。
+
+---
+
 ## 偏离原计划的地方（7 条，全部有意为之）
 
 | # | 偏离 | 原因 |
