@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
 .SYNOPSIS
     Windows 脚本层的运行时自检。可以在 Windows PowerShell 5.1 和 PowerShell 7 上跑同一份。
@@ -152,6 +152,13 @@ try {
     $emptyPathSurvived = $true
     try { $null = Get-DailyTwinFreeSpaceGb -Path '' } catch { $emptyPathSurvived = $false }
     Write-DailyTwinCheck -Name '空路径不抛异常（遥测脚本会传空的 SystemDrive）' -Condition $emptyPathSurvived
+    $uncFreeSpace = Get-DailyTwinFreeSpaceGb -Path '\\server\share\folder'
+    Write-DailyTwinCheck -Name 'UNC 路径返回 null（不把网络路径当本地卷）' -Condition ($null -eq $uncFreeSpace) -Detail "得到：$uncFreeSpace"
+    $invalidFreeSpace = Get-DailyTwinFreeSpaceGb -Path '::invalid::'
+    Write-DailyTwinCheck -Name '无效路径返回 null' -Condition ($null -eq $invalidFreeSpace) -Detail "得到：$invalidFreeSpace"
+    Write-DailyTwinCheck -Name '负数可用空间返回 null' -Condition ($null -eq (ConvertTo-DailyTwinFreeSpaceGb -AvailableBytes -1 -TotalBytes 100))
+    Write-DailyTwinCheck -Name '超过卷总容量返回 null' -Condition ($null -eq (ConvertTo-DailyTwinFreeSpaceGb -AvailableBytes 101 -TotalBytes 100))
+    Write-DailyTwinCheck -Name '合法容量按 GB 返回' -Condition ((ConvertTo-DailyTwinFreeSpaceGb -AvailableBytes 5GB -TotalBytes 10GB) -eq 5)
 
     Write-Output '--- Resolve-DailyTwinPwsh ---'
     Write-DailyTwinCheck -Name '不存在的可执行文件返回 null' -Condition ($null -eq (Resolve-DailyTwinPwsh -Preferred 'definitely-not-a-real-exe'))
