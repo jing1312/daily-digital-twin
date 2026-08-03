@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Windows 脚本层的运行时自检。可以在 Windows PowerShell 5.1 和 PowerShell 7 上跑同一份。
