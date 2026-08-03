@@ -118,3 +118,15 @@ bash .github/scripts/cli-smoke.sh
 API Key、PAT、飞书 App Secret、Cookie、验证码、真实 Windows 用户目录、真实软件路径、任务文字、截图、下载文件、浏览器资料、运行数据库、日志和 Token 账本。提交前和 CI 都会运行 `npm run audit:privacy`。
 
 许可证：[MIT](LICENSE)
+
+## 浏览器迁移与 48 小时切换
+
+- 任务只允许在已配对的 Microsoft Edge 任务标签组内执行；Edge 未连接或标签归属丢失时立即进入 waiting_for_user，不会静默切换到 Chrome。
+- 迁移旧的 OpenClaw 运行目录前，先用 platform/windows/Backup-DailyTwinState.ps1 备份 SQLite 和会话文件，再按 docs/RUNBOOK.md 验证新控制平面。
+- 新架构必须连续稳定运行 48 小时，并完成真实飞书、Edge、Multica 和已登记桌面软件验收后，才可以停用旧的 OpenClaw 自启动；失败时保留检查点并按手册回滚。
+
+## 验收标准
+
+一次完整验收应覆盖：飞书发送普通任务并得到任务号；固定网页流程填写后读取值复核、提交并保存页面证据；验证码或登录弹窗进入等待状态并能按任务号继续；软件启动后有进程和窗口证据；资源不足时暂停新动作；最终回执包含真实完成部分、证据路径和失败原因。
+
+公开仓只存代码、示例配置、测试和运维文档；私有运行目录、浏览器资料、任务内容、截图、下载文件、日志、数据库和 Token 账本永不提交。

@@ -262,34 +262,64 @@ function Enter-DailyTwinProcessLock {
 
 # 中文注释：磁盘剩余空间按卷返回 GB，取不到时返回 $null 而不是 0，避免被当成"磁盘满了"。
 # 中文注释：允许空路径 —— 这个函数被遥测采集调用，遥测采集绝不能因为一个取不到的环境变量整体崩掉。
+# 中文注释：只接受可验证的磁盘容量；未知、负数或超过卷总容量时一律返回 $null。
+function ConvertTo-DailyTwinFreeSpaceGb {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][AllowNull()]$AvailableBytes,
+        [Parameter(Mandatory = $true)][AllowNull()]$TotalBytes
+    )
+
+    try {
+        if ($null -eq $AvailableBytes -or $null -eq $TotalBytes) { return $null }
+        $available = [double]$AvailableBytes
+        $total = [double]$TotalBytes
+        if ([double]::IsNaN($available) -or [double]::IsInfinity($available)) { return $null }
+        if ([double]::IsNaN($total) -or [double]::IsInfinity($total)) { return $null }
+        if ($total -le 0 -or $available -lt 0 -or $available -gt $total) { return $null }
+        return [math]::Round($available / 1GB, 2)
+    } catch {
+        return $null
+    }
+}
+
+# 中文注释：DriveInfo 只在 Windows 本地盘符上使用；非 Windows、UNC、无效路径或
+# 中文注释：容量异常时返回 $null，不能用虚构的巨大空间替代缺失遥测。
 function Get-DailyTwinFreeSpaceGb {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][AllowEmptyString()][AllowNull()][string]$Path)
 
     if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
+    if ([System.Environment]::OSVersion.Platform -ne 'Win32NT') { return $null }
 
     try {
-        $rootPath = [System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath($Path))
-        if (-not [string]::IsNullOrWhiteSpace($rootPath)) {
-            $driveInfo = New-Object System.IO.DriveInfo($rootPath)
-            if ($driveInfo.IsReady) {
-                return [math]::Round([double]$driveInfo.AvailableFreeSpace / 1GB, 2)
-            }
-        }
+        $fullPath = [System.IO.Path]::GetFullPath($Path)
+        $rootPath = [System.IO.Path]::GetPathRoot($fullPath)
+        # 只允许类似 C:\ 的本地 Windows 盘符；UNC 根路径必须失败关闭。
+        if ([string]::IsNullOrWhiteSpace($rootPath) -or $rootPath -notmatch '^[A-Za-z]:\\$') { return $null }
     } catch {
-        Write-Verbose "DriveInfo 读取磁盘剩余空间失败（$Path）：$($_.Exception.Message)"
+        return $null
     }
 
     try {
-        $qualifier = Split-Path -Path ([System.IO.Path]::GetFullPath($Path)) -Qualifier
-        if ([string]::IsNullOrWhiteSpace($qualifier)) { return $null }
+        $driveInfo = New-Object System.IO.DriveInfo($rootPath)
+        if ($driveInfo.IsReady) {
+            $driveFree = ConvertTo-DailyTwinFreeSpaceGb -AvailableBytes $driveInfo.AvailableFreeSpace -TotalBytes $driveInfo.TotalSize
+            if ($null -ne $driveFree) { return $driveFree }
+        }
+    } catch {
+        Write-Verbose "DriveInfo 读取磁盘剩余空间失败（$Path）：$([string]$_.Exception.Message)"
+    }
+
+    try {
+        $qualifier = $rootPath.Substring(0, 2)
         $disk = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='$qualifier'" -ErrorAction Stop
         if ($null -eq $disk) { return $null }
         $free = Get-DailyTwinProperty -InputObject $disk -Name 'FreeSpace'
-        if ($null -eq $free) { return $null }
-        return [math]::Round([double]$free / 1GB, 2)
+        $total = Get-DailyTwinProperty -InputObject $disk -Name 'Size'
+        return (ConvertTo-DailyTwinFreeSpaceGb -AvailableBytes $free -TotalBytes $total)
     } catch {
-        Write-Verbose "读取磁盘剩余空间失败（$Path）：$($_.Exception.Message)"
+        Write-Verbose "读取磁盘剩余空间失败（$Path）：$([string]$_.Exception.Message)"
         return $null
     }
 }
