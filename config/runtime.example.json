@@ -54,7 +54,8 @@
     "feishu": {
       "appId": null,
       "appSecretFile": "config/feishu-app-secret.secret",
-      "allowedOpenIds": []
+      "allowedOpenIds": [],
+      "allowFirstPairing": false
     },
     "multica": {
       "enabled": true,

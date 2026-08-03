@@ -60,7 +60,10 @@ export const DEFAULT_CONFIG = {
     feishu: {
       appId: null,
       appSecretFile: 'config/feishu-app-secret.secret',
-      allowedOpenIds: []
+      allowedOpenIds: [],
+      // 中文注释：首次配对开关。默认 false = 失败关闭：名单为空且还没绑定归属账号时一律拒绝。
+      //           只在第一次配对那几分钟临时设为 true，绑定完成后立刻改回 false。
+      allowFirstPairing: false
     },
     multica: {
       enabled: true,
@@ -168,6 +171,11 @@ export function validateConfig(config) {
   checkPrivateRelativePath(problems, 'integrations.pricing', config.integrations?.pricing);
   checkPrivateRelativePath(problems, 'integrations.capabilitySecretFile', config.integrations?.capabilitySecretFile);
   checkPrivateRelativePath(problems, 'integrations.feishu.appSecretFile', config.integrations?.feishu?.appSecretFile);
+  const feishu = config.integrations?.feishu;
+  if (!Array.isArray(feishu?.allowedOpenIds) || feishu.allowedOpenIds.some((value) => typeof value !== 'string' || !value.trim())) {
+    problems.push('integrations.feishu.allowedOpenIds 必须是非空字符串组成的数组（可以为空数组）');
+  }
+  checkBoolean(problems, 'integrations.feishu.allowFirstPairing', feishu?.allowFirstPairing);
 
   const multica = config.integrations?.multica;
   checkBoolean(problems, 'integrations.multica.enabled', multica?.enabled);

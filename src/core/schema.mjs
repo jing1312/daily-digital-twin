@@ -239,9 +239,25 @@ function dateKeyFromIso(value) {
   return /^\d{8}$/.test(compact) ? compact : '00000000';
 }
 
+// 中文注释：从 tasks.public_id 里量出每个日期已经用掉的最大序号。
+//           回填和计数器同步都以实际表状态为准，这样不管库是怎么走到当前状态的，
+//           "下一个序号还没被占用"这个不变量都成立。
+//           序号写成 \d{4,} 而不是 \d{4}：满 4 位之后会自然进到 5 位，不能只认 4 位。
+function readUsedTaskSequences(db) {
+  const used = new Map();
+  for (const row of db.prepare(`SELECT public_id FROM tasks WHERE public_id IS NOT NULL`).all()) {
+    const matched = /^DT-(\d{8})-(\d{4,})$/.exec(String(row.public_id ?? ''));
+    if (!matched) continue;
+    const sequence = Number.parseInt(matched[2], 10);
+    if (!Number.isSafeInteger(sequence)) continue;
+    if (sequence > (used.get(matched[1]) ?? 0)) used.set(matched[1], sequence);
+  }
+  return used;
+}
+
 function backfillPublicTaskIds(db) {
   const rows = db.prepare(`SELECT id, created_at FROM tasks WHERE public_id IS NULL ORDER BY id ASC`).all();
-  const counters = new Map();
+  const counters = readUsedTaskSequences(db);
   const update = db.prepare(`UPDATE tasks SET public_id = ? WHERE id = ? AND public_id IS NULL`);
   for (const row of rows) {
     const dateKey = dateKeyFromIso(row.created_at);
@@ -249,6 +265,20 @@ function backfillPublicTaskIds(db) {
     counters.set(dateKey, sequence);
     update.run(`DT-${dateKey}-${String(sequence).padStart(4, '0')}`, row.id);
   }
+
+  // 中文注释：回填完必须把 daily_task_counters 推到已用序号之后。少了这一步，
+  //           createTask 会从 1 重新发号，撞上 tasks_public_id 唯一索引；而 createTask
+  //           整个包在 writeTransaction 里，撞索引会整笔回滚、计数器永远不前进 ——
+  //           表现是"迁移之后当天再也建不了任务"，不是"重试几次就好"。
+  //           用 MAX() 合并：库里计数器本来就更靠前时（v3~v5 升上来的库）这一步是空操作。
+  const stamp = new Date().toISOString();
+  const sync = db.prepare(`
+    INSERT INTO daily_task_counters (date_key, next_value, updated_at) VALUES (?, ?, ?)
+    ON CONFLICT(date_key) DO UPDATE SET
+      next_value = MAX(next_value, excluded.next_value),
+      updated_at = excluded.updated_at
+  `);
+  for (const [dateKey, sequence] of counters) sync.run(dateKey, sequence + 1, stamp);
 }
 
 // 中文注释：版本闸 + 逐列幂等升级。返回迁移报告，供测试和 doctor 脚本核对。
