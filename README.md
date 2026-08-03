@@ -1,5 +1,6 @@
 # Daily Digital Twin
 
+<<<<<<< codex/multica-control-plane
 一个运行在 Windows 本机上的个人工作替身：手机通过飞书发任务，简单动作由本机直接执行，复杂任务交给 Multica 拆分并由最多四个隔离的 Codex worker 处理。
 
 当前主链是 **飞书 + Daily Twin + Multica + Codex + Microsoft Playwright MCP**。OpenClaw 不参与新任务，只保留为迁移期间的回滚备份；新架构连续稳定运行 48 小时后才能停用旧自启动。
@@ -52,10 +53,41 @@ Daily Twin 本机控制平面 ---- 状态 / 暂停 / 继续 / 取消 / 看证据
 | 电池模式 | 最多 1 |
 
 网页等待、软件计算和任务排队不要求模型进程持续占用资源。超过 90 分钟的 worker 只有保存了本轮新检查点才会重签能力票并续跑；否则停止并如实失败。Token 账本按任务和 worker 记录输入、缓存输入、输出、延迟和本地估价；缓存 Token 视为输入 Token 的子集，只按缓存费率计一次。Multica 聚合用量按 issue 更新快照，未知模型价格保持为空，不猜中转站费用。
+=======
+[中文说明](README.zh-CN.md) · [Architecture](docs/ARCHITECTURE.md) · [Operations runbook](docs/RUNBOOK.md) · [Browser profiles](docs/BROWSER-PROFILES.md)
 
-## 目录
+A privacy-first local task runtime for Windows, Feishu, browser automation, and controlled desktop execution. A phone can submit a task through Feishu; a remote model may propose a plan; the local runtime reviews policy, executes through configured adapters, and requires observable evidence before reporting completion.
+
+The source code is public. Runtime state, credentials, browser sessions, screenshots, logs, personal files, and machine-specific application paths remain in a required private directory outside the repository.
+
+## Engineering evidence
+
+- **132 Node unit tests** covering task state, scheduling, identity binding, resource locks, redaction, evidence verification, and related invariants
+- **CI on Linux and Windows** with Node 24, privacy auditing, CLI smoke tests, PowerShell parsing, encoding checks, and platform self-tests
+- **Zero third-party runtime dependencies**; the runtime uses Node standard-library components, including `node:sqlite` and `node:test`
+- **Fail-closed resource policy**: missing or invalid telemetry produces zero execution slots rather than permissive defaults
+- **Evidence-gated completion**: a task without valid process, window, page, or file evidence is downgraded to `partial`
+- **Human confirmation boundaries** for deletion, overwrite, upload, payment, messaging, and public posting
+
+## Safety boundaries
+
+This project is intentionally conservative because it can interact with signed-in browser sessions and local applications.
+>>>>>>> main
+
+- The remote model is a planning component, not a trusted executor.
+- The scheduler is disabled by default and must be enabled explicitly.
+- CAPTCHA prompts, login dialogs, and tasks requiring human judgement pause for intervention.
+- Verification codes are passed only to the active page; they are not stored in receipts.
+- The first Feishu sender becomes the bound owner; later senders are rejected until a local reset.
+- Desktop automation is foreground-exclusive, and resources such as applications, files, and tabs are locked against conflicting tasks.
+- Secrets and personal paths are rejected by a repository privacy audit that also runs in CI.
+
+These controls reduce risk; they do not make unattended browser or desktop automation universally safe. Review the configuration and threat model before connecting real accounts.
+
+## Architecture
 
 ```text
+<<<<<<< codex/multica-control-plane
 src/core/             状态、资源、能力票、Token、单实例锁
 src/gateway/          飞书 WebSocket、验证码、回执和证据发送
 src/execution/        固定网页流程与 Windows 软件执行
@@ -130,3 +162,109 @@ API Key、PAT、飞书 App Secret、Cookie、验证码、真实 Windows 用户�
 一次完整验收应覆盖：飞书发送普通任务并得到任务号；固定网页流程填写后读取值复核、提交并保存页面证据；验证码或登录弹窗进入等待状态并能按任务号继续；软件启动后有进程和窗口证据；资源不足时暂停新动作；最终回执包含真实完成部分、证据路径和失败原因。
 
 公开仓只存代码、示例配置、测试和运维文档；私有运行目录、浏览器资料、任务内容、截图、下载文件、日志、数据库和 Token 账本永不提交。
+=======
+phone / Feishu          remote model                 Windows machine
+      |                      |                              |
+      | task text            | untrusted plan               |
+      +--------------------->+----------------------------->|
+                             |                              | policy review
+                             |                              | controlled execution
+                             |                              | evidence verification
+                             |<-----------------------------+
+                                  redacted receipt
+```
+
+```text
+src/core/            task state, policy, routing, redaction, verification
+src/runtime.mjs      command-line entry point
+platform/windows/    setup, telemetry, backup, repair, and self-test scripts
+config/*.example.*   sanitised example configuration
+scripts/             privacy and source audits
+test/                Node test suite
+docs/                architecture, operations, browser routing, and bug-fix record
+```
+
+Private state lives under `DAILY_TWIN_HOME`. There is no repository-local fallback: the CLI exits with an error when the private home is not configured.
+
+## Requirements
+
+- Windows 11 for the intended deployment environment
+- Node.js 24 or newer
+- PowerShell for platform setup, telemetry, and Windows self-tests
+- A separately configured compatible model endpoint for planning
+- Explicitly configured browser and application adapters for real execution
+
+No `npm install` step is required because the project declares no runtime or development dependencies.
+
+## Quick start
+
+Set up the private state directory from PowerShell:
+
+```powershell
+.\platform\windows\Set-DailyTwinPaths.ps1 -PrivateHome 'D:\DailyTwin\home'
+$env:DAILY_TWIN_HOME = 'D:\DailyTwin\home'
+```
+
+Initialise the runtime and inspect its state:
+
+```powershell
+npm run runtime -- init
+npm run runtime -- create 'Open the configured research workspace and enter TEST_TEXT'
+npm run runtime -- status
+npm run runtime -- doctor
+```
+
+The scheduler remains dormant after installation:
+
+```powershell
+npm run runtime -- scheduler status
+npm run runtime -- scheduler enable
+```
+
+Read [`docs/RUNBOOK.md`](docs/RUNBOOK.md) before enabling routine execution. Browser-profile behaviour and unattended-operation constraints are documented in [`docs/BROWSER-PROFILES.md`](docs/BROWSER-PROFILES.md).
+
+## Verification
+
+Run the cross-platform checks before committing:
+
+```bash
+npm test
+npm run audit:privacy
+npm run smoke
+npm run check
+```
+
+Windows adds PowerShell-specific checks:
+
+```powershell
+npm run lint:ps
+npm run selftest:ps
+```
+
+`npm run check` combines the Node tests, privacy audit, and CLI smoke test. CI also verifies that the project remains dependency-free and that Windows scripts retain the encoding and line-ending properties required by Windows PowerShell 5.1.
+
+## Status and limitations
+
+| Component | Status | Important limitation |
+| --- | --- | --- |
+| Core task store and policy | Tested | Designed for one owner on one Windows machine |
+| Privacy audit and redaction | CI-enforced | Cannot compensate for secrets deliberately committed outside the audited patterns |
+| Scheduler | Dormant by default | Requires fresh CPU and power telemetry before accepting work |
+| Browser routing | Documented and guarded | Some profiles require a human or a separate initial login |
+| Built-in executor | Safe placeholder | Returns `partial`; real machine-specific execution must be configured privately |
+| Destructive or external actions | Confirmation-gated | Human approval remains part of the security model |
+
+The repository is an experimental personal automation framework, not a general-purpose autonomous agent or a security-certified product.
+
+## Documentation
+
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — trust model, state, scheduling, verification, and design trade-offs
+- [`docs/RUNBOOK.md`](docs/RUNBOOK.md) — setup and operations
+- [`docs/BROWSER-PROFILES.md`](docs/BROWSER-PROFILES.md) — browser routes, requirements, and unattended-operation limits
+- [`docs/BUGFIX-LOG.md`](docs/BUGFIX-LOG.md) — defects, fixes, and the tests that guard them
+- [`README.zh-CN.md`](README.zh-CN.md) — the preserved original Chinese landing page
+
+## Licence
+
+MIT. See [`LICENSE`](LICENSE).
+>>>>>>> main
