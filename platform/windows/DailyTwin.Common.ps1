@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Daily Digital Twin 的 Windows 脚本公共库。用点号引入：. "$PSScriptRoot\DailyTwin.Common.ps1"
