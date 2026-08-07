@@ -30,7 +30,9 @@ param(
     [ValidateSet('openclaw', 'user', 'chrome', 'edge-extension', 'edge-existing-session')]
     [string]$BrowserProfileName = 'openclaw',
 
-    [ValidateSet('efficient', 'full')]
+    # 中文注释：页面快照格式。三个值对应三条不同的 CLI 参数，见下面 switch 里的实测来源说明。
+    # 中文注释：efficient 明显省 token，是本项目默认；full 是显式 ai 格式；aria 是无障碍树。
+    [ValidateSet('efficient', 'full', 'aria')]
     [string]$SnapshotMode = 'efficient',
 
     [string]$OpenClawPath = 'openclaw.cmd'
@@ -65,18 +67,35 @@ switch ($Action) {
         $browserArguments = @('open', $Url)
     }
     'snapshot' {
-        $browserArguments = @('snapshot', '--format', 'aria')
-        if ($SnapshotMode -eq 'efficient') { $browserArguments += @('--mode', 'efficient') }
+        # 中文注释：这套映射来自真机上 openclaw 2026.7.1-2 的实测（CLI 帮助 + 安装源码），不是从文档推的。
+        # 中文注释：文档在这里靠不住 —— /cli/browser 页面只写了 `snapshot` 和 `snapshot --urls`，
+        # 中文注释：而 `openclaw browser snapshot --help` 子命令帮助只显示 -h。两处都不完整，
+        # 中文注释：曾经据此拼出 `--format aria --mode efficient`，被真机拒绝。
+        #
+        # 中文注释：关键约束：aria 和 efficient 互斥 —— efficient 要求 format=ai。
+        # 中文注释：所以这三条分支里，--format aria 和 --efficient 永远不会同时出现。
+        #
+        # 中文注释：full 走显式 --format ai，不是"aria 的完整版" —— 两者是不同的提取格式。
+        # 中文注释：显式给 --format 还有一个副作用是我们要的：能压住全局
+        # 中文注释：browser.snapshotDefaults.mode=efficient（那个默认只在调用方没显式指定时才生效）。
+        switch ($SnapshotMode) {
+            'efficient' { $browserArguments = @('snapshot', '--efficient') }
+            'full'      { $browserArguments = @('snapshot', '--format', 'ai') }
+            'aria'      { $browserArguments = @('snapshot', '--format', 'aria') }
+            default     { throw "未知的 SnapshotMode：$SnapshotMode" }
+        }
         if (-not [string]::IsNullOrWhiteSpace($TargetId)) { $browserArguments += @('--target-id', $TargetId) }
     }
     'type' {
         if ($Ref -lt 0) { throw 'type 需要 -Ref（页面元素编号）' }
         if ([string]::IsNullOrEmpty($Text)) { throw 'type 需要 -Text' }
         $browserArguments = @('type', "$Ref", $Text)
+        if (-not [string]::IsNullOrWhiteSpace($TargetId)) { $browserArguments += @('--target-id', $TargetId) }
     }
     'screenshot' {
         $browserArguments = @('screenshot')
-        if (-not [string]::IsNullOrWhiteSpace($TargetId)) { $browserArguments += @('--target-id', $TargetId) }
+        # 中文注释：screenshot 的 targetId 是位置参数；它和 snapshot/type 的 --target-id 契约不同。
+        if (-not [string]::IsNullOrWhiteSpace($TargetId)) { $browserArguments += $TargetId }
     }
     'status' {
         $browserArguments = @('status')

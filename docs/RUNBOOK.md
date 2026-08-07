@@ -106,6 +106,90 @@ npm run runtime -- init
 
 ---
 
+## 3b. 切到路线 C：受管隔离浏览器（改 `openclaw.json`）
+
+> **范围提醒：这一步只是把配置和工具准备好，浏览器还没有接进生产任务链。**
+> 也就是说，做完这一步之后，你从飞书发一个"打开某网页并截图"的任务，**它不会真的去开浏览器** ——
+> `routeBrowserAction()` 目前只有测试在调用，`Invoke-DailyTwinBrowser.ps1` 也还没有生产调用点。
+> 接线（飞书任务 → 路由 → 浏览器执行 → 证据验证 → 回执）放在单独一个 PR 里做。
+> 现在做这一步的意义是：把 `openclaw.json` 改对、把手动验证的路子铺好。
+
+前提：第 3 步的备份已经做完。这一步会真的改你机器上的 `openclaw.json`。
+
+为什么"让替身用 Edge"一直不成功、以及为什么选路线 C，完整推导在
+`docs/BROWSER-PROFILES.md`。这里只讲怎么做。
+
+```powershell
+# 1) 只预览。默认不写盘，看清楚要改哪几项、为什么改
+.\platform\windows\Set-OpenClawBrowserProfile.ps1 -ConfigPath <openclaw.json 的完整路径>
+
+# 2) 确认无误后落盘。会先生成时间戳 .bak，并打印一行回滚命令
+.\platform\windows\Set-OpenClawBrowserProfile.ps1 -ConfigPath <openclaw.json 的完整路径> -Apply
+```
+
+参数：
+
+- `-ConfigPath`（必填）：`openclaw.json` 的完整路径。
+- `-SnapshotMode`：**只接受 `efficient`**。这一项写的是 `browser.snapshotDefaults.mode`，
+  是个全局默认，OpenClaw 只认这一个值。`full` / `aria` 是**单次调用**的格式选择，
+  由 `Invoke-DailyTwinBrowser.ps1 -SnapshotMode` 决定，不能写成全局默认。
+- `-Apply`：不加这个开关，脚本绝不写任何文件。
+
+原来还有一个 `-ManagedUserDataDir` 参数，**已经删掉**。它写出来的顶层 `browser.userDataDir`
+是 OpenClaw 根本不读的键，等于在回执里承诺一件不会发生的事。受管浏览器的登录态固定落在
+`%OPENCLAW_HOME%\.openclaw\browser\openclaw\user-data`，位置改不了；要让它待在 D 盘，
+办法是把 `OPENCLAW_HOME` 放在 D 盘（第 2 步已经这么做了）。回执里的 `managedUserDataDir`
+字段会照当前 `OPENCLAW_HOME` 算出实际路径，备份和磁盘策略盯这个路径就行。
+
+回执里的 `status` 有四种：`preview`（只预览）、`applied`（已落盘）、`already_ok`（本来就对，
+重复跑不会重复改）、`blocked`（有需要你自己决定的冲突，见下）。
+
+两种会被拒绝自动处理的情况：
+
+- `allow_and_alsoallow_conflict`：`tools.allow` 已存在。它和 `tools.alsoAllow` 是替换 vs
+  追加两种语义，同一作用域不能共存。删掉 `allow` 可能顺手关掉别的工具，只能你自己定。
+- `plugin_allowlist_excludes_browser`：`plugins.allow` 是非空白名单但不含 `browser`。
+  插件加载发生在工具策略之前，这道闸不打开，后面配得再对也没用。
+
+安全网（三层，都在脚本里）：
+
+1. 落盘前先 `Copy-Item` 出 `openclaw.json.<时间戳>.bak`，备份没生成就不写。
+2. 序列化时按对象**实际嵌套深度**给 `ConvertTo-Json -Depth`。
+   `ConvertTo-Json` 默认只有 2 层，本项目公共函数原本固定给 6 层——一旦你的配置嵌套更深，
+   超出的层会被静默写成 `"@{a=1}"` 这种字符串，等于把配置写坏。现在会先量再写，量不下就报错。
+3. 写完立刻读回来逐项核对：顶层键没丢、文件里没有截断特征串、`tools.alsoAllow` 含 `browser`、
+   `browser.defaultProfile` 是 `openclaw`。任何一项不对，就用备份原地还原并抛错。
+
+落盘之后：
+
+```powershell
+# 重启网关让新配置生效，然后确认 browser 工具这次真的存在
+openclaw browser status
+```
+
+然后按 `docs/BROWSER-PROFILES.md` 的"一次性登录清单"，把常用站点在受管浏览器里各登录一次，
+并把域名写进私有目录 `config/runtime.json` 的 `browser.managedLoggedInHosts`：
+
+```jsonc
+{
+  "browser": {
+    "managedLoggedInHosts": [".feishu.cn", "www.ncbi.nlm.nih.gov"]
+  }
+}
+```
+
+`".feishu.cn"` 这种点开头的写法匹配主域和它的全部子域；不带点则只匹配那一个主机名。
+这份列表**只影响提示文案，不会拦下任何任务**——它是人手工声明的，不是程序观测到的，
+让一份可能过期的清单决定放不放行是错的。
+
+出问题就回滚（回执里那行命令可以直接粘贴）：
+
+```powershell
+Copy-Item -LiteralPath '<openclaw.json>.<时间戳>.bak' -Destination '<openclaw.json>' -Force
+```
+
+---
+
 ## 4. 遥测：让替身知道机器忙不忙
 
 `os.cpus()` 在部分环境下返回全零时间片，导致 CPU 占用取不到值。资源策略是
@@ -172,8 +256,13 @@ npm run doctor
 
 输出里最值得看的三个字段：
 
-- `telemetrySources` —— `cpu` / `power` 分别来自 `local_sample` / `env` / `file` / `unavailable`。
+- `telemetrySources` —— `cpu` / `power` 的实际来源，取值为 `env` / `file` / `local` / `unavailable`。
+  优先级是 **环境变量 > 新鲜的遥测文件 > Node 本机采样**（`power` 没有本机采样，只有前两种）。
   如果是 `unavailable`，看 `telemetryReasons` 里的原因码。
+  有一个反直觉的情况值得记住：遥测文件**新鲜但 `cpuPercent` 无效**时，原因码是 `missing_cpu_percent`，
+  并且**不会**回退到本机采样 —— 这是刻意的失败关闭，宁可停工也不拿另一个来源掩盖坏掉的传感器。
+  想恢复只有两条路：修好 `Write-DailyTwinTelemetry.ps1` 的写入，或者删掉 `data/telemetry.json`
+  （文件不存在时才会启用本机采样兜底）。临时救急可以设 `DAILY_TWIN_CPU_PERCENT`。
 - `resourcePolicy.acceptsNewActions` —— `false` 就是不接新活，`reason` 会说为什么。
 - `migration` —— 数据库从哪个 schema 版本升到了哪个版本。
 
@@ -307,6 +396,10 @@ npm run selftest:ps
 
 - [ ] 第 1 步：环境变量真的写进用户级，重开窗口能读到。
 - [ ] 第 3 步：备份产物完整（配置 + sqlite + 全部 jsonl），且源目录未被改动。
+- [ ] 第 3b 步：预览输出与真实 `openclaw.json` 对得上；`-Apply` 后 `.bak` 已生成，
+      且 OpenClaw 能正常读起新配置；`openclaw browser status` 返回正常。
+- [ ] 第 3b 步：受管浏览器里登录一次后**重启网关**，同一站点不再要求登录
+      （这一条才真正证明登录态持久化，只能在真机上验证）。
 - [ ] 第 4 步：`telemetry.json` 里 `cpuPercent` 和 `onAcPower` 都不是 `null`。
 - [ ] 第 5 步：`Invoke-DailyTwinDoctor.ps1` 全绿；`npm run doctor` 的
       `resourcePolicy.acceptsNewActions` 为 `true`。

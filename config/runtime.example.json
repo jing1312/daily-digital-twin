@@ -31,7 +31,8 @@
     "defaultProfile": "openclaw",
     "signedInProfile": null,
     "snapshotMode": "efficient",
-    "edgeUserDataDir": null
+    "edgeUserDataDir": null,
+    "managedLoggedInHosts": []
   },
   "storage": {
     "maxCacheMb": 2048,

@@ -121,3 +121,34 @@ test('默认配置包含本轮新增的存储上限与执行验证开关', () =>
   assert.ok(DEFAULT_CONFIG.storage.keepFreeDiskGb >= 20, '需为系统盘保留余量');
   assert.equal(DEFAULT_CONFIG.browser.defaultProfile, 'openclaw', '默认不碰用户日常浏览器');
 });
+
+test('snapshotMode 与 managedLoggedInHosts 的非法取值会被配置校验拦下', () => {
+  // 中文注释：snapshotMode 会被原样传给 PowerShell 的 ValidateSet，
+  // 中文注释：不在这里拦，就会变成一个看不懂的参数校验错误。
+  assert.throws(
+    () => validateConfig(mergeConfig(DEFAULT_CONFIG, { browser: { snapshotMode: 'efficent' } })),
+    (error) => error.code === 'invalid_config' && error.problems.some((p) => p.includes('snapshotMode'))
+  );
+  // 中文注释：aria 是真机上确实存在的格式（snapshot --format aria），必须放行；
+  // 中文注释：ai 则不是本项目的对外取值 —— 对外叫 full，内部才映射成 --format ai，别把内部拼法漏成配置项。
+  for (const mode of ['efficient', 'full', 'aria']) {
+    assert.doesNotThrow(
+      () => validateConfig(mergeConfig(DEFAULT_CONFIG, { browser: { snapshotMode: mode } })),
+      `snapshotMode=${mode} 应当被接受`
+    );
+  }
+  assert.throws(
+    () => validateConfig(mergeConfig(DEFAULT_CONFIG, { browser: { snapshotMode: 'ai' } })),
+    (error) => error.code === 'invalid_config' && error.problems.some((p) => p.includes('snapshotMode'))
+  );
+  assert.throws(
+    () => validateConfig(mergeConfig(DEFAULT_CONFIG, { browser: { managedLoggedInHosts: 'feishu.cn' } })),
+    (error) => error.problems.some((p) => p.includes('managedLoggedInHosts'))
+  );
+  assert.throws(
+    () => validateConfig(mergeConfig(DEFAULT_CONFIG, { browser: { managedLoggedInHosts: ['ok.com', '  '] } })),
+    (error) => error.problems.some((p) => p.includes('managedLoggedInHosts'))
+  );
+  const good = validateConfig(mergeConfig(DEFAULT_CONFIG, { browser: { managedLoggedInHosts: ['.feishu.cn'] } }));
+  assert.deepEqual(good.browser.managedLoggedInHosts, ['.feishu.cn']);
+});

@@ -108,6 +108,31 @@ try {
     try { ConvertFrom-DailyTwinJson -Path (Join-Path $workRoot 'missing.json') | Out-Null } catch { $threw = $true }
     Write-DailyTwinCheck -Name '文件不存在时抛错' -Condition $threw
 
+    Write-Output '--- JSON 深度（ConvertTo-Json 的 -Depth 默认只有 2，写别人的真实配置时会静默截断）---'
+    Write-DailyTwinCheck -Name '标量深度是 0' -Condition ((Get-DailyTwinJsonDepth -InputObject 'text') -eq 0)
+    Write-DailyTwinCheck -Name 'null 深度是 0' -Condition ((Get-DailyTwinJsonDepth -InputObject $null) -eq 0)
+    Write-DailyTwinCheck -Name '平铺对象深度是 1' -Condition ((Get-DailyTwinJsonDepth -InputObject ([pscustomobject]@{ a = 1 })) -eq 1)
+    Write-DailyTwinCheck -Name '数组本身算一层' -Condition ((Get-DailyTwinJsonDepth -InputObject ([pscustomobject]@{ a = @(@{ b = 1 }) })) -eq 3)
+    Write-DailyTwinCheck -Name '日期是标量不是属性袋' -Condition ((Get-DailyTwinJsonDepth -InputObject ([DateTime]::UtcNow)) -eq 0)
+
+    $deepText = '{"a":{"b":{"c":{"d":{"e":{"f":{"g":{"h":"keep"}}}}}}}}'
+    $deepObject = $deepText | ConvertFrom-Json
+    Write-DailyTwinCheck -Name '八层嵌套量出来就是 8' -Condition ((Get-DailyTwinJsonDepth -InputObject $deepObject) -eq 8) -Detail "得到：$(Get-DailyTwinJsonDepth -InputObject $deepObject)"
+
+    # 中文注释：反向对照 —— 用旧的固定 -Depth 6 序列化同一个对象，必须能被截断检测抓到。
+    $truncatedText = $deepObject | ConvertTo-Json -Depth 6 -Compress -WarningAction SilentlyContinue
+    Write-DailyTwinCheck -Name '固定深度 6 确实会截断（反向对照）' -Condition (Test-DailyTwinJsonTruncated -Text $truncatedText) -Detail $truncatedText
+    Write-DailyTwinCheck -Name '正常 JSON 文本不误报截断' -Condition (-not (Test-DailyTwinJsonTruncated -Text '{"p":"D:\\DailyTwin\\workspace","n":[1,2]}'))
+    Write-DailyTwinCheck -Name '空文本不误报截断' -Condition (-not (Test-DailyTwinJsonTruncated -Text ''))
+
+    $deepPath = Join-Path $workRoot 'deep.json'
+    Write-DailyTwinJsonFile -Path $deepPath -InputObject $deepObject
+    $deepBack = ConvertFrom-DailyTwinJson -Path $deepPath
+    Write-DailyTwinCheck -Name '八层嵌套写盘再读回来一字不差' -Condition ($deepBack.a.b.c.d.e.f.g.h -eq 'keep') -Detail (Get-Content -Raw -LiteralPath $deepPath)
+    Write-DailyTwinCheck -Name '写出的文件里没有截断特征串' -Condition (-not (Test-DailyTwinJsonTruncated -Text (Get-Content -Raw -LiteralPath $deepPath)))
+    Write-DailyTwinCheck -Name '调用方要求更大深度时不会被压小' -Condition ((Resolve-DailyTwinJsonDepth -InputObject ([pscustomobject]@{ a = 1 }) -Minimum 20) -eq 20)
+    Write-DailyTwinCheck -Name '深度上限是 100' -Condition ((Resolve-DailyTwinJsonDepth -InputObject ([pscustomobject]@{ a = 1 }) -Minimum 500) -eq 100)
+
     Write-Output '--- Resolve-DailyTwinHome（不允许退回仓库目录）---'
     $homeA = Join-Path $workRoot 'home-a'
     $homeB = Join-Path $workRoot 'home-b'
@@ -135,6 +160,78 @@ try {
 
     Write-Output '--- Resolve-DailyTwinPwsh ---'
     Write-DailyTwinCheck -Name '不存在的可执行文件返回 null' -Condition ($null -eq (Resolve-DailyTwinPwsh -Preferred 'definitely-not-a-real-exe'))
+    # 中文注释：上面那条断言在 Linux 上是假通过 —— 三个兜底目录的环境变量都为空，
+    # 中文注释：函数根本走不到"猜一份 pwsh"的分支，所以真机上的替身缺陷在沙盒里照样全绿。
+    # 中文注释：这里手工造出兜底目标，让同一条语义在任何系统上都能真的被验证。
+    $savedProgramFiles = $env:ProgramFiles
+    try {
+        $fakeRoot = Join-Path $workRoot 'fake-program-files'
+        $null = New-Item -ItemType Directory -Force -Path $fakeRoot
+        # 中文注释：拼法必须和 Resolve-DailyTwinPwsh 里的一模一样（含反斜杠），否则测的不是同一条路径。
+        $fakePwsh = Join-Path $fakeRoot 'PowerShell\7\pwsh.exe'
+        $null = New-Item -ItemType File -Force -Path $fakePwsh
+        $env:ProgramFiles = $fakeRoot
+        Write-DailyTwinCheck -Name '兜底目录里存在 pwsh 时，也不许拿它冒充别的可执行文件' -Condition ($null -eq (Resolve-DailyTwinPwsh -Preferred 'definitely-not-a-real-exe')) -Detail "兜底目标：$fakePwsh"
+    } finally {
+        $env:ProgramFiles = $savedProgramFiles
+    }
+    # 中文注释：B28 —— 完整路径漏口。真机实测：传 C:\Windows\System32\cmd.exe，函数把它原样返回了。
+    # 中文注释：注意一个坑：直接拿 'C:\Windows\System32\cmd.exe' 当断言，在 Linux 上是假通过 ——
+    # 中文注释：Unix 下 \ 不是路径分隔符，GetFileName 会把整串原样吐回来，于是走的根本不是同一条分支。
+    # 中文注释：所以下面既留了她真机上的原始写法（在 Windows CI 上才有意义），
+    # 中文注释：也用本系统原生的完整路径再测一遍，保证这条语义在任何系统上都真的被验证。
+    $realForeignExe = if ($onWindows) { "$env:SystemRoot\System32\cmd.exe" } else { '/bin/true' }
+    Write-DailyTwinCheck -Name '完整路径的非 pwsh 程序必须返回 null（本系统原生写法）' -Condition ($null -eq (Resolve-DailyTwinPwsh -Preferred $realForeignExe)) -Detail "传入：$realForeignExe"
+    Write-DailyTwinCheck -Name '完整路径的 cmd.exe 必须返回 null（真机复现的原始写法）' -Condition ($null -eq (Resolve-DailyTwinPwsh -Preferred 'C:\Windows\System32\cmd.exe'))
+    Write-DailyTwinCheck -Name '相对路径的非 pwsh 程序也必须返回 null' -Condition ($null -eq (Resolve-DailyTwinPwsh -Preferred 'tools/cmd.exe'))
+
+    # 中文注释：同一类错误的另一半 —— 名字对但位置不存在时，不许换成兜底目录里的另一份 pwsh。
+    # 中文注释：这一条必须在「兜底目标真实存在」的前提下测，否则又是假通过。
+    $savedProgramFiles2 = $env:ProgramFiles
+    try {
+        $decoyRoot = Join-Path $workRoot 'decoy-program-files'
+        $decoyPwsh = Join-Path $decoyRoot 'PowerShell\7\pwsh.exe'
+        $null = New-Item -ItemType File -Force -Path $decoyPwsh
+        $env:ProgramFiles = $decoyRoot
+
+        $missingRooted = Join-Path $workRoot 'Custom/pwsh.exe'
+        Write-DailyTwinCheck -Name '点名一个不存在的完整路径 pwsh，不许改用兜底目录里那份' -Condition ($null -eq (Resolve-DailyTwinPwsh -Preferred $missingRooted)) -Detail "诱饵：$decoyPwsh"
+        Write-DailyTwinCheck -Name '点名一个不存在的相对路径 pwsh，同样不许换' -Condition ($null -eq (Resolve-DailyTwinPwsh -Preferred 'some/where/pwsh.exe')) -Detail "诱饵：$decoyPwsh"
+
+        # 中文注释：反过来也要守住 —— 完整路径指向的 pwsh 确实存在时，必须原样返回，不能连好的一起毙掉。
+        $realRootedDir = Join-Path $workRoot 'real-pwsh'
+        $null = New-Item -ItemType Directory -Force -Path $realRootedDir
+        $realRooted = Join-Path $realRootedDir 'pwsh.exe'
+        if ($onWindows) {
+            $null = New-Item -ItemType File -Force -Path $realRooted
+        } else {
+            Copy-Item -LiteralPath '/bin/true' -Destination $realRooted -Force
+            & /usr/bin/chmod '755' $realRooted
+        }
+        $resolvedRooted = Resolve-DailyTwinPwsh -Preferred $realRooted
+        Write-DailyTwinCheck -Name '完整路径指向的 pwsh 真实存在时原样返回' -Condition ($resolvedRooted -eq $realRooted) -Detail "得到：$resolvedRooted"
+
+        # 中文注释：B28b —— 三个边界，全都会在「兜底目标真实存在」时悄悄换掉程序。
+        # 中文注释：空白那条尤其隐蔽：调用方传了个空字符串进来，拿到的却是系统里的 PowerShell 7。
+        Write-DailyTwinCheck -Name '空串返回 null 而不是抛参数错误' -Condition ($null -eq (Resolve-DailyTwinPwsh -Preferred ''))
+        Write-DailyTwinCheck -Name '纯空白返回 null，不许落进兜底搜索' -Condition ($null -eq (Resolve-DailyTwinPwsh -Preferred ' ')) -Detail "诱饵：$decoyPwsh"
+
+        # 中文注释：通配符必须拒绝。造一个真的能被通配符命中的 pwsh，否则这条又是假通过。
+        $wildDir = Join-Path $workRoot 'wild/PowerShell/7'
+        $null = New-Item -ItemType Directory -Force -Path $wildDir
+        $wildTarget = Join-Path $wildDir 'pwsh.exe'
+        if ($onWindows) {
+            $null = New-Item -ItemType File -Force -Path $wildTarget
+        } else {
+            Copy-Item -LiteralPath '/bin/true' -Destination $wildTarget -Force
+            & /usr/bin/chmod '755' $wildTarget
+        }
+        $wildPattern = Join-Path $workRoot 'wild/PowerShell/*/pwsh.exe'
+        Write-DailyTwinCheck -Name '通配符路径一律拒绝，不许替调用方挑一个' -Condition ($null -eq (Resolve-DailyTwinPwsh -Preferred $wildPattern)) -Detail "能命中：$wildTarget"
+    } finally {
+        $env:ProgramFiles = $savedProgramFiles2
+    }
+
     $foundPwsh = Resolve-DailyTwinPwsh -Preferred 'pwsh'
     if ($null -ne $foundPwsh) {
         Write-DailyTwinCheck -Name '能在 PATH 上找到 pwsh' -Condition ($true) -Detail $foundPwsh
@@ -187,6 +284,248 @@ try {
         try { Get-DailyTwinAppEntry -Catalog $duplicateCatalog -Name 'shared' | Out-Null } catch { $threw = $true }
         Write-DailyTwinCheck -Name '别名重复时抛错而不是随便选一个' -Condition $threw
     }
+
+    Write-Output '--- Set-OpenClawBrowserProfile.ps1（路线 C：改的是别人的真实配置，容不得半点马虎）---'
+    $script:openClawScript = Join-Path $PSScriptRoot 'Set-OpenClawBrowserProfile.ps1'
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+
+    function Invoke-DailyTwinProfileScript {
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory = $true)][string]$Path,
+            [switch]$ApplyChanges,
+            [switch]$DryRun,
+            [string]$SnapshotMode
+        )
+        $parameters = @{ ConfigPath = $Path; WarningAction = 'SilentlyContinue' }
+        if ($ApplyChanges) { $parameters['Apply'] = $true }
+        if ($DryRun) { $parameters['WhatIf'] = $true }
+        if (-not [string]::IsNullOrWhiteSpace($SnapshotMode)) { $parameters['SnapshotMode'] = $SnapshotMode }
+        $captured = @(& $script:openClawScript @parameters)
+        $line = @($captured | Where-Object { $_ -is [string] -and $_.StartsWith('{') }) | Select-Object -Last 1
+        if ($null -eq $line) { return $null }
+        return ($line | ConvertFrom-Json)
+    }
+
+    # 中文注释：这份样例照着真机 openclaw.json 的形状写，但路径一律用中性目录，不能带真实个人路径。
+    # 中文注释：deep 那一段是深度回归用的 —— 8 层嵌套在旧的固定 -Depth 6 下会被写成 "@{...}"。
+    $ocDir = Join-Path $workRoot 'openclaw'
+    $null = New-Item -ItemType Directory -Force -Path $ocDir
+    $baseConfigText = '{"workspace":"D:\\DailyTwin\\workspace","maxConcurrent":2,"model":"openai/gpt-5.6-sol","timezone":"Asia/Shanghai","gateway":{"mode":"local","port":18789,"bind":"loopback","auth":{"mode":"token"}},"session":{"dmScope":"per-channel-peer"},"tools":{"profile":"coding","fs":{"workspaceOnly":true},"exec":{"mode":"auto","strictInlineEval":true},"elevated":{"enabled":false}},"deep":{"l2":{"l3":{"l4":{"l5":{"l6":{"l7":"keep"}}}}}}}'
+
+    $ocPath = Join-Path $ocDir 'openclaw.json'
+    [System.IO.File]::WriteAllText($ocPath, $baseConfigText, $utf8NoBom)
+    $originalText = [System.IO.File]::ReadAllText($ocPath, $utf8NoBom)
+
+    $preview = Invoke-DailyTwinProfileScript -Path $ocPath
+    Write-DailyTwinCheck -Name '预览返回 status=preview' -Condition ($null -ne $preview -and $preview.status -eq 'preview') -Detail "得到：$($preview.status)"
+    Write-DailyTwinCheck -Name '预览列出了待改项' -Condition ($null -ne $preview -and @($preview.changes).Count -gt 0)
+    Write-DailyTwinCheck -Name '预览一个字节都没改' -Condition (([System.IO.File]::ReadAllText($ocPath, $utf8NoBom)) -eq $originalText)
+    Write-DailyTwinCheck -Name '预览不生成备份' -Condition (@(Get-ChildItem -LiteralPath $ocDir -Filter '*.bak').Count -eq 0)
+
+    # 中文注释：-Apply -WhatIf 是最容易说谎的一条路 —— 加了 -Apply，但 ShouldProcess 把写盘拦了下来。
+    # 中文注释：回执如果还报 applied、还给一个 rollbackCommand，那就是在报告一件没发生过的事，
+    # 中文注释：跟当初那个「VS Code 明明没装却说打开了」是同一类错误，必须钉死。
+    $dryRun = Invoke-DailyTwinProfileScript -Path $ocPath -ApplyChanges -DryRun
+    Write-DailyTwinCheck -Name '-Apply -WhatIf 如实报 preview 而不是 applied' -Condition ($null -ne $dryRun -and $dryRun.status -eq 'preview') -Detail "得到：$($dryRun.status)"
+    Write-DailyTwinCheck -Name '-Apply -WhatIf 不给 backupPath' -Condition ($null -ne $dryRun -and $null -eq $dryRun.backupPath) -Detail "得到：$($dryRun.backupPath)"
+    Write-DailyTwinCheck -Name '-Apply -WhatIf 不给 rollbackCommand' -Condition ($null -ne $dryRun -and $null -eq $dryRun.rollbackCommand)
+    Write-DailyTwinCheck -Name '-Apply -WhatIf 确实没生成备份文件' -Condition (@(Get-ChildItem -LiteralPath $ocDir -Filter '*.bak').Count -eq 0)
+    Write-DailyTwinCheck -Name '-Apply -WhatIf 一个字节都没改' -Condition (([System.IO.File]::ReadAllText($ocPath, $utf8NoBom)) -eq $originalText)
+
+    $applied = Invoke-DailyTwinProfileScript -Path $ocPath -ApplyChanges
+    Write-DailyTwinCheck -Name '落盘返回 status=applied' -Condition ($null -ne $applied -and $applied.status -eq 'applied') -Detail "得到：$($applied.status)"
+    $backupFiles = @(Get-ChildItem -LiteralPath $ocDir -Filter '*.bak')
+    Write-DailyTwinCheck -Name '落盘前先生成了备份' -Condition ($backupFiles.Count -eq 1) -Detail "找到 $($backupFiles.Count) 份"
+    if ($backupFiles.Count -eq 1) {
+        Write-DailyTwinCheck -Name '备份与原文件逐字节一致' -Condition (([System.IO.File]::ReadAllText($backupFiles[0].FullName, $utf8NoBom)) -eq $originalText)
+    }
+    Write-DailyTwinCheck -Name '回执里给出了可直接粘贴的回滚命令' -Condition ($null -ne $applied -and -not [string]::IsNullOrWhiteSpace($applied.rollbackCommand)) -Detail $applied.rollbackCommand
+
+    $writtenText = [System.IO.File]::ReadAllText($ocPath, $utf8NoBom)
+    $writtenBytes = [System.IO.File]::ReadAllBytes($ocPath)
+    $writtenHasBom = ($writtenBytes.Length -ge 3 -and $writtenBytes[0] -eq 0xEF -and $writtenBytes[1] -eq 0xBB -and $writtenBytes[2] -eq 0xBF)
+    Write-DailyTwinCheck -Name '写回去的配置没有 BOM' -Condition (-not $writtenHasBom)
+    Write-DailyTwinCheck -Name '写回去的配置没有截断特征串' -Condition (-not (Test-DailyTwinJsonTruncated -Text $writtenText))
+
+    $afterConfig = ConvertFrom-DailyTwinJson -Path $ocPath
+    Write-DailyTwinCheck -Name 'tools.alsoAllow 补上了 browser' -Condition (@($afterConfig.tools.alsoAllow) -contains 'browser')
+    Write-DailyTwinCheck -Name 'browser.defaultProfile = openclaw' -Condition ($afterConfig.browser.defaultProfile -eq 'openclaw')
+    Write-DailyTwinCheck -Name 'browser.snapshotDefaults.mode = efficient' -Condition ($afterConfig.browser.snapshotDefaults.mode -eq 'efficient')
+    # 中文注释：B30 —— 顶层 browser.userDataDir 是 OpenClaw 根本不读的键，写进去只会污染真机配置。
+    # 中文注释：userDataDir 只在 browser.profiles.<name>.userDataDir 下面有意义，而且只对 existing-session 驱动生效；
+    # 中文注释：受管浏览器用的是它自己固定的 user-data 目录，改不了。所以这里断言"这个键压根没被写出来"。
+    $browserKeys = @($afterConfig.browser.PSObject.Properties | ForEach-Object { $_.Name })
+    Write-DailyTwinCheck -Name '不再写入 OpenClaw 不读的顶层 browser.userDataDir' -Condition (-not ($browserKeys -contains 'userDataDir')) -Detail ($browserKeys -join ',')
+    Write-DailyTwinCheck -Name '原有的浅层配置没被动过' -Condition ($afterConfig.tools.profile -eq 'coding' -and $afterConfig.gateway.port -eq 18789)
+    Write-DailyTwinCheck -Name '原有的三层配置没被动过' -Condition ($afterConfig.tools.exec.strictInlineEval -eq $true -and $afterConfig.gateway.auth.mode -eq 'token')
+    # 中文注释：这一条就是把"改配置反而写坏配置"钉死的回归断言。
+    Write-DailyTwinCheck -Name '八层嵌套的原有配置完好无损（深度回归）' -Condition ($afterConfig.deep.l2.l3.l4.l5.l6.l7 -eq 'keep') -Detail $writtenText
+
+    $again = Invoke-DailyTwinProfileScript -Path $ocPath -ApplyChanges
+    Write-DailyTwinCheck -Name '重复执行报 already_ok（幂等）' -Condition ($null -ne $again -and $again.status -eq 'already_ok') -Detail "得到：$($again.status)"
+    Write-DailyTwinCheck -Name '幂等执行不再生成新备份' -Condition (@(Get-ChildItem -LiteralPath $ocDir -Filter '*.bak').Count -eq 1)
+
+    # 中文注释：旧版脚本曾经写入无效的顶层 browser.userDataDir。新版不能只是不再新增，
+    # 中文注释：还必须把自己留下的污染列成迁移项；否则会带着坏键返回 already_ok。
+    $legacyUserDataPath = Join-Path $ocDir 'with-legacy-user-data-dir.json'
+    $legacyUserDataText = '{"tools":{"alsoAllow":["browser"]},"browser":{"defaultProfile":"openclaw","snapshotDefaults":{"mode":"efficient"},"userDataDir":"D:\\obsolete-browser-profile"}}'
+    [System.IO.File]::WriteAllText($legacyUserDataPath, $legacyUserDataText, $utf8NoBom)
+    $legacyPreview = Invoke-DailyTwinProfileScript -Path $legacyUserDataPath
+    Write-DailyTwinCheck -Name '旧版顶层 browser.userDataDir 被列为迁移项' `
+        -Condition ($null -ne $legacyPreview -and $legacyPreview.status -eq 'preview' -and @($legacyPreview.changes | ForEach-Object { $_.path }) -contains 'browser.userDataDir') `
+        -Detail "status=$($legacyPreview.status); changes=$(@($legacyPreview.changes | ForEach-Object { $_.path }) -join ',')"
+    $legacyApplied = Invoke-DailyTwinProfileScript -Path $legacyUserDataPath -ApplyChanges
+    $legacyAfter = ConvertFrom-DailyTwinJson -Path $legacyUserDataPath
+    $legacyBrowserKeys = @($legacyAfter.browser.PSObject.Properties | ForEach-Object { $_.Name })
+    Write-DailyTwinCheck -Name '应用迁移后删除旧版顶层 browser.userDataDir' `
+        -Condition ($null -ne $legacyApplied -and $legacyApplied.status -eq 'applied' -and $legacyBrowserKeys -notcontains 'userDataDir') `
+        -Detail "status=$($legacyApplied.status); keys=$($legacyBrowserKeys -join ',')"
+
+    # 中文注释：闸门一 —— allow 是替换语义，alsoAllow 是追加语义，同一作用域不能共存，只能由人决定。
+    $allowPath = Join-Path $ocDir 'with-allow.json'
+    [System.IO.File]::WriteAllText($allowPath, '{"tools":{"profile":"coding","allow":["fs","exec"]}}', $utf8NoBom)
+    $allowBefore = [System.IO.File]::ReadAllText($allowPath, $utf8NoBom)
+    $allowResult = Invoke-DailyTwinProfileScript -Path $allowPath
+    Write-DailyTwinCheck -Name 'tools.allow 存在时判定为 blocked' -Condition ($null -ne $allowResult -and $allowResult.status -eq 'blocked') -Detail "得到：$($allowResult.status)"
+    Write-DailyTwinCheck -Name '拦截原因是 allow/alsoAllow 冲突' -Condition ($null -ne $allowResult -and @($allowResult.blockers | ForEach-Object { $_.code }) -contains 'allow_and_alsoallow_conflict')
+    $threw = $false
+    try { Invoke-DailyTwinProfileScript -Path $allowPath -ApplyChanges | Out-Null } catch { $threw = $true }
+    Write-DailyTwinCheck -Name '带 -Apply 也要抛错拒绝' -Condition $threw
+    Write-DailyTwinCheck -Name '被拦下时文件原封不动' -Condition (([System.IO.File]::ReadAllText($allowPath, $utf8NoBom)) -eq $allowBefore)
+
+    # 中文注释：闸门二 —— plugins.allow 在工具策略之前就决定插件加不加载。
+    $pluginPath = Join-Path $ocDir 'with-plugin-allow.json'
+    [System.IO.File]::WriteAllText($pluginPath, '{"tools":{"profile":"coding"},"plugins":{"allow":["memory","search"]}}', $utf8NoBom)
+    $pluginBefore = [System.IO.File]::ReadAllText($pluginPath, $utf8NoBom)
+    $pluginResult = Invoke-DailyTwinProfileScript -Path $pluginPath
+    Write-DailyTwinCheck -Name 'plugins.allow 白名单缺 browser 时判定为 blocked' -Condition ($null -ne $pluginResult -and $pluginResult.status -eq 'blocked') -Detail "得到：$($pluginResult.status)"
+    Write-DailyTwinCheck -Name '拦截原因是插件白名单不含 browser' -Condition ($null -ne $pluginResult -and @($pluginResult.blockers | ForEach-Object { $_.code }) -contains 'plugin_allowlist_excludes_browser')
+    $threw = $false
+    try { Invoke-DailyTwinProfileScript -Path $pluginPath -ApplyChanges | Out-Null } catch { $threw = $true }
+    Write-DailyTwinCheck -Name '插件白名单被拦时同样拒绝落盘' -Condition ($threw -and ([System.IO.File]::ReadAllText($pluginPath, $utf8NoBom)) -eq $pluginBefore)
+
+    # 中文注释：plugins.allow 里已经有 browser 就不该拦。
+    $pluginOkPath = Join-Path $ocDir 'plugin-allow-ok.json'
+    [System.IO.File]::WriteAllText($pluginOkPath, '{"tools":{"profile":"coding"},"plugins":{"allow":["memory","browser"]}}', $utf8NoBom)
+    $pluginOk = Invoke-DailyTwinProfileScript -Path $pluginOkPath
+    Write-DailyTwinCheck -Name '插件白名单已含 browser 时不拦' -Condition ($null -ne $pluginOk -and $pluginOk.status -eq 'preview') -Detail "得到：$($pluginOk.status)"
+
+    $missingResult = $null
+    $threw = $false
+    try { $missingResult = Invoke-DailyTwinProfileScript -Path (Join-Path $ocDir 'nope.json') } catch { $threw = $true }
+    Write-DailyTwinCheck -Name '配置文件不存在时抛错而不是凭空造一个' -Condition ($threw -and $null -eq $missingResult)
+
+    # 中文注释：B30b —— browser.snapshotDefaults.mode 是全局默认，OpenClaw 只认 efficient。
+    # 中文注释：full / aria 是"单次调用的 format 选择"，写成全局 mode 就是往真机配置里塞非法值。
+    # 中文注释：所以这个脚本的 -SnapshotMode 必须只收 efficient，其余一律被 ValidateSet 挡在门外。
+    foreach ($badMode in @('full', 'aria', 'ai')) {
+        $threw = $false
+        try { Invoke-DailyTwinProfileScript -Path $ocPath -SnapshotMode $badMode | Out-Null } catch { $threw = $true }
+        Write-DailyTwinCheck -Name "-SnapshotMode $badMode 被拒绝（全局默认只能是 efficient）" -Condition $threw
+    }
+
+    Write-Output '--- Invoke-DailyTwinBrowser.ps1 快照参数（真机 openclaw 2026.7.1-2 实测契约）---'
+    # 中文注释：这一段不是"断言我拼的字符串等于我想拼的字符串" —— 那种断言两边都是同一个信念，测不出东西。
+    # 中文注释：这里真的把脚本跑起来，用一个会把 argv 落盘的替身可执行文件顶替 openclaw，
+    # 中文注释：然后检查真实传出去的命令行。仍然只是单元测试（没有真的 OpenClaw），但至少测的是代码路径而不是我的记忆。
+    #
+    # 中文注释：契约来源 —— 真机 CLI 帮助 + 安装源码，不是文档：
+    # 中文注释：   efficient -> snapshot --efficient
+    # 中文注释：   full      -> snapshot --format ai
+    # 中文注释：   aria      -> snapshot --format aria
+    # 中文注释：最关键的一条是 aria 和 efficient 互斥（efficient 要求 format=ai），任何分支都不许两者同时出现。
+    $browserScript = Join-Path $PSScriptRoot 'Invoke-DailyTwinBrowser.ps1'
+    $stubDir = Join-Path $workRoot 'openclaw-stub'
+    $null = New-Item -ItemType Directory -Force -Path $stubDir
+    $argvPath = Join-Path $stubDir 'argv.txt'
+    if ($onWindows) {
+        $stubPath = Join-Path $stubDir 'openclaw-stub.cmd'
+        $stubText = "@echo off`r`necho %* > `"$argvPath`"`r`nexit /b 0`r`n"
+        [System.IO.File]::WriteAllText($stubPath, $stubText, (New-Object System.Text.ASCIIEncoding))
+    } else {
+        $stubPath = Join-Path $stubDir 'openclaw-stub.sh'
+        $stubText = "#!/bin/sh`nprintf '%s\n' `"`$@`" > '$argvPath'`nexit 0`n"
+        [System.IO.File]::WriteAllText($stubPath, $stubText, (New-Object System.Text.UTF8Encoding($false)))
+        & /usr/bin/chmod '755' $stubPath
+    }
+
+    function Get-DailyTwinActionStubArgv {
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory = $true)][string]$Action,
+            [string]$Mode = 'efficient',
+            [string]$Url,
+            [string]$TargetId,
+            [int]$Ref = -1,
+            [string]$Text
+        )
+        Remove-Item -LiteralPath $argvPath -Force -ErrorAction SilentlyContinue
+        $parameters = @{ Action = $Action; SnapshotMode = $Mode; OpenClawPath = $stubPath }
+        if (-not [string]::IsNullOrWhiteSpace($Url)) { $parameters['Url'] = $Url }
+        if (-not [string]::IsNullOrWhiteSpace($TargetId)) { $parameters['TargetId'] = $TargetId }
+        if ($Ref -ge 0) { $parameters['Ref'] = $Ref }
+        if ($null -ne $Text) { $parameters['Text'] = $Text }
+        & $browserScript @parameters | Out-Null
+        if (-not (Test-Path -LiteralPath $argvPath)) { return $null }
+        return ((Get-Content -LiteralPath $argvPath -Raw) -replace '\s+', ' ').Trim()
+    }
+
+    function Get-DailyTwinStubArgv {
+        [CmdletBinding()]
+        param([Parameter(Mandatory = $true)][string]$Mode)
+        return (Get-DailyTwinActionStubArgv -Action 'snapshot' -Mode $Mode)
+    }
+
+    $stubSanity = Get-DailyTwinStubArgv -Mode 'efficient'
+    Write-DailyTwinCheck -Name '替身可执行文件真的被调用了（否则下面全是空断言）' -Condition ($null -ne $stubSanity -and $stubSanity -like '*browser*') -Detail "argv=$stubSanity"
+
+    $expectedArgv = @{
+        'efficient' = 'snapshot --efficient'
+        'full'      = 'snapshot --format ai'
+        'aria'      = 'snapshot --format aria'
+    }
+    foreach ($mode in @('efficient', 'full', 'aria')) {
+        $argv = Get-DailyTwinStubArgv -Mode $mode
+        Write-DailyTwinCheck -Name "-SnapshotMode $mode 传出的是 $($expectedArgv[$mode])" -Condition ($null -ne $argv -and $argv -like "*$($expectedArgv[$mode])*") -Detail "argv=$argv"
+        # 中文注释：互斥约束单独钉一条 —— 这是当初真机报错的直接原因，也是最容易再犯的一条。
+        $hasAria = $argv -like '*--format aria*'
+        $hasEfficient = $argv -like '*--efficient*'
+        Write-DailyTwinCheck -Name "-SnapshotMode $mode 没有把互斥的 aria 和 efficient 拼在一起" -Condition (-not ($hasAria -and $hasEfficient)) -Detail "argv=$argv"
+        # 中文注释：--mode 是 snapshot 的独立参数，本脚本从不使用它；出现即说明又拼回了被真机拒绝的老写法。
+        Write-DailyTwinCheck -Name "-SnapshotMode $mode 没有再拼出 --mode efficient 这种老写法" -Condition ($argv -notlike '*--mode*') -Detail "argv=$argv"
+    }
+
+    # 中文注释：full 不等于 aria —— 这是纠正的核心，两者是不同的提取格式，必须分别落到 ai 和 aria。
+    $fullArgv = Get-DailyTwinStubArgv -Mode 'full'
+    Write-DailyTwinCheck -Name 'full 走 --format ai，不等同于 ARIA' -Condition ($fullArgv -like '*--format ai*' -and $fullArgv -notlike '*aria*') -Detail "argv=$fullArgv"
+
+    $threw = $false
+    try { & $browserScript -Action snapshot -SnapshotMode 'nonsense' -OpenClawPath $stubPath | Out-Null } catch { $threw = $true }
+    Write-DailyTwinCheck -Name '未知 SnapshotMode 被 ValidateSet 拒绝' -Condition $threw
+
+    # 中文注释：目标标签是任务隔离的边界。type 必须显式传 --target-id，不能写进当前碰巧激活的页面；
+    # 中文注释：screenshot 的 OpenClaw 契约则是位置参数 screenshot <targetId>，不是 --target-id。
+    $taskTargetId = 'task-tab-123'
+    $openArgv = Get-DailyTwinActionStubArgv -Action 'open' -Url 'https://example.invalid/task'
+    Write-DailyTwinCheck -Name 'open 把 URL 作为位置参数传给 OpenClaw' `
+        -Condition ($openArgv -like '*open https://example.invalid/task*') -Detail "argv=$openArgv"
+
+    $snapshotTargetArgv = Get-DailyTwinActionStubArgv -Action 'snapshot' -Mode 'efficient' -TargetId $taskTargetId
+    Write-DailyTwinCheck -Name 'snapshot 把目标标签作为 --target-id 传给 OpenClaw' `
+        -Condition ($snapshotTargetArgv -like "*snapshot --efficient --target-id $taskTargetId*") -Detail "argv=$snapshotTargetArgv"
+
+    $typeArgv = Get-DailyTwinActionStubArgv -Action 'type' -TargetId $taskTargetId -Ref 42 -Text 'TEST_TEXT'
+    Write-DailyTwinCheck -Name 'type 把目标标签作为 --target-id 传给 OpenClaw' `
+        -Condition ($typeArgv -like "*type 42 TEST_TEXT --target-id $taskTargetId*") -Detail "argv=$typeArgv"
+
+    $screenshotArgv = Get-DailyTwinActionStubArgv -Action 'screenshot' -TargetId $taskTargetId
+    Write-DailyTwinCheck -Name 'screenshot 把目标标签作为位置参数传给 OpenClaw' `
+        -Condition ($screenshotArgv -like "*screenshot $taskTargetId*" -and $screenshotArgv -notlike '*--target-id*') -Detail "argv=$screenshotArgv"
+
+    $statusArgv = Get-DailyTwinActionStubArgv -Action 'status'
+    Write-DailyTwinCheck -Name 'status 不夹带其他动作参数' `
+        -Condition ($statusArgv -like '*--json status' -and $statusArgv -notlike '*--target-id*') -Detail "argv=$statusArgv"
 } finally {
     $env:DAILY_TWIN_HOME = $originalHome
     Remove-Item -LiteralPath $workRoot -Recurse -Force -ErrorAction SilentlyContinue

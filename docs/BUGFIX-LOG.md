@@ -282,6 +282,324 @@
 
 ---
 
+## B25 `Write-DailyTwinJsonFile` 会静默截断嵌套较深的 JSON
+
+第三处"我自己造出来的洞"，而且是这三处里唯一会**弄坏用户真实数据**的。
+
+`ConvertTo-Json` 的 `-Depth` 默认只有 2，超出的层级不会报错，而是被写成
+`"@{a=1}"` 这样的字符串。`DailyTwin.Common.ps1` 里的 `Write-DailyTwinJsonFile`
+原本固定给 `-Depth 6`——比默认好，但仍然是一个**猜出来的常数**。
+
+它此前只写自己造的浅对象（遥测读数、应用目录），所以一直没暴露。
+`Set-OpenClawBrowserProfile.ps1` 要写的是**用户真实的 `openclaw.json`**：
+只要那份配置里任何一处嵌套超过 6 层，写回去就会把那一段变成字符串，
+而且过程中一声不吭。用户拿到的是一个能解析、但语义已经坏掉的配置。
+
+修法（在公共层修，所有调用方一起受益）：
+
+1. 新增 `Get-DailyTwinJsonDepth` —— 递归量出对象的实际嵌套深度。
+   哈希表、数组、普通属性袋各算一层；字符串和值类型算 0 层。
+   实现上必须用 `ArrayList.Add` 逐个装子节点：走管道的话数组会被 PowerShell 展开，
+   "数组也占一层"就量不出来了（这一条是写完第一版后被自检里的断言抓出来的）。
+2. 新增 `Resolve-DailyTwinJsonDepth` —— 实测深度 +2 的余量，不低于调用方要求的值，
+   上限 100。
+3. 新增 `Test-DailyTwinJsonTruncated` —— 检查序列化结果里有没有
+   `"@{`、`"System.Collections.Hashtable"` 这类截断特征串。
+   `Write-DailyTwinJsonFile` 一旦检出就**抛错，不写盘**。
+4. `Set-OpenClawBrowserProfile.ps1` 落盘后还会把文件读回来核对顶层键、截断特征串、
+   `tools.alsoAllow`、`browser.defaultProfile`，任何一项不对就用备份原地还原。
+
+回归断言（`Test-DailyTwinPlatform.ps1`）：造一份含 8 层嵌套的 `openclaw.json` 样例，
+先用旧的固定 `-Depth 6` 序列化同一个对象、断言**确实**能被截断检测抓到（反向对照），
+再跑一遍完整的 `-Apply`，断言那 8 层原有配置在改完之后仍然一字不差。
+
+---
+
+## B26 `-Apply -WhatIf` 会报告一次没发生过的写盘
+
+**来源：** PR #1 上 Copilot 代码审查提出，复核后确认成立，且比它描述的更严重。
+
+`Set-OpenClawBrowserProfile.ps1` 里 `$backupPath` 是在 `ShouldProcess` **之前**赋值的，
+`status` 又只看 `$Apply` 这个开关。于是加了 `-Apply -WhatIf`（或者交互确认时选「否」）时：
+
+- 实际什么都没写、也没生成 `.bak`；
+- 回执却报 `status: applied`，还给出一个 `rollbackCommand`，指向一个**根本不存在的备份文件**。
+
+照着那条命令回滚，`Copy-Item` 会因为源文件不存在而报错——在真出事、急着回滚的时候。
+
+这和当初「VS Code 明明没装，却报告已经打开」是同一类错误：**报告一件没发生过的事**。
+整个替身项目的执行校验机制就是为了根治这类问题，结果我自己在新脚本里又犯了一次。
+
+**改法：** 引入 `$applied` 标记；`$backupPath` 只有在 `Test-Path` 确认备份实体存在之后才赋值；
+`status` 改看 `$applied`。被 `-WhatIf` 拦下的情况如实报 `preview`——因为结果确实和预览一模一样。
+
+**负向对照：** 用修复前的脚本跑新增的 5 条断言，其中 3 条挂掉，
+分别是 `得到：applied`、`backupPath` 指向一个不存在的 `.bak`、`rollbackCommand` 非空。
+
+---
+
+## B27 URL 前面粘一个全角空格，登录态提示就退化成泛泛而谈
+
+**来源：** 同一轮 Copilot 审查。**它给的理由是错的，但结论碰巧是对的。**
+
+它说 `hostnameOf` 判空用了 `url.trim()`、解析却传原始 `url`，所以带空格的 URL 会解析失败。
+实测下来不是这样：WHATWG 的 `new URL()` 自己就会剥掉首尾的半角空格和 C0 控制符，
+Tab／换行更是在任意位置都会被移除。**它举的例子本来就是好的。**
+
+但它无意中戳中了另一个真问题：`new URL()` **不认全角空格 U+3000 和不换行空格 U+00A0**，
+而 JS 的 `trim()` 认。任务文本是她用中文输入法从手机上打过来的，**全角空格是常态**。
+
+| 输入 | 修复前 | 修复后 |
+|---|---|---|
+| `'  https://feishu.cn/docs  '`（半角） | `feishu.cn` | `feishu.cn` |
+| `'\nhttps://feishu.cn/docs\t'` | `feishu.cn` | `feishu.cn` |
+| `'\u3000https://feishu.cn/docs'`（全角空格） | **`null`** | `feishu.cn` |
+| `'\u00a0https://feishu.cn/docs'` | **`null`** | `feishu.cn` |
+| `'https://feishu.cn/docs\u3000'`（全角在尾部） | `feishu.cn` | `feishu.cn` |
+
+后果不是崩溃，是**静默降级**：`signedInHostKnown` 从 `true`/`false` 掉成 `null`，
+本来能说「feishu.cn 已登记过登录态」的具体提示，退回成「这个 profile 不带你日常浏览器的登录态」的套话。
+不致命，但正好废掉了这一轮新加的那套提示。
+
+**改法：** 解析也用 `trim()` 之后的串。
+
+**负向对照：** 新增的这条测试如果只测半角空格就是**白测**（修复前后都过）。
+所以断言用的是 U+3000 和 U+00A0；把 `hostnameOf` 换回修复前的实现，这条测试立刻挂。
+
+---
+
+## B28 `Resolve-DailyTwinPwsh` 会接受一个带完整路径的非 PowerShell 程序
+
+**来源：** 她在真机上实测发现 —— 传入 `C:\Windows\System32\cmd.exe`，函数把它原样返回了。
+
+守卫原本是三个条件与在一起：
+
+```powershell
+if (-not [string]::IsNullOrWhiteSpace($Preferred) -and
+    [System.IO.Path]::GetFileName($Preferred) -notin @('pwsh', 'pwsh.exe') -and
+    -not [System.IO.Path]::IsPathRooted($Preferred)) {   # <- 这一行是洞
+    return $null
+}
+```
+
+第三个条件的意思变成了「只要给的是完整路径，就不检查名字了」。于是任何一个带盘符的
+可执行文件都能冒充 pwsh 被返回出去，而这个返回值最终是要被写进计划任务、开机自动跑的。
+
+**顺带发现的另一半（同一类错误，比上面那条更糟）：** 名字对、但位置不存在时，函数会
+**改用兜底目录里的另一份 pwsh**：
+
+| 传入 | 修复前返回 | 修复后 |
+|---|---|---|
+| `/bin/true`（完整路径，非 pwsh，文件真实存在） | **`/bin/true`** | `$null` |
+| `C:\Windows\System32\cmd.exe` | **原样返回** | `$null` |
+| `<workRoot>\Custom\pwsh.exe`（不存在） | **`<ProgramFiles>\PowerShell\7\pwsh.exe`** | `$null` |
+| `some/where/pwsh.exe`（不存在） | **`<ProgramFiles>\PowerShell\7\pwsh.exe`** | `$null` |
+| `<真实存在的>\pwsh.exe` | 原样返回 | 原样返回（不变） |
+
+函数自己的注释从第一天起就写着「**不得猜测成另一份 pwsh**」，但代码没做到。
+调用方点名了一个具体位置，拿到的却是别的位置上的另一个文件 —— 这就是 VS Code 幻觉事件的形态。
+
+**改法：** 把输入明确分成两类，两条路不互相兜底。
+
+- 裸名 `pwsh` / `pwsh.exe` —— 等于「没有偏好」，可以查 PATH、可以走兜底目录；
+- 带目录的路径 —— 等于「我就要这一个」，只在该位置找，找不到返回 `$null`；
+- 其余一切 —— `$null`，带不带完整路径都一样。
+
+**负向对照，以及一个必须说清楚的陷阱：**
+
+直接拿 `'C:\Windows\System32\cmd.exe'` 当断言，**在 Linux 上是假通过**：Unix 下 `\` 不是
+路径分隔符，`GetFileName` 会把整串原样吐回来，于是它落进「名字不对」的分支返回 `$null` ——
+过是过了，走的却根本不是出问题的那条路。实测修复前的代码在沙箱里跑这条断言同样是 `ok`。
+
+所以这一组断言里同时放了两种写法：她真机上的原始写法（只有 Windows CI 上才有判定力），
+以及本系统原生的完整路径（`$onWindows` 分支，任何系统上都真的走到出问题的分支）。
+用修复前的 `DailyTwin.Common.ps1` 跑，在沙箱里挂 3 条：
+
+```
+FAIL 完整路径的非 pwsh 程序必须返回 null（本系统原生写法）  传入：/bin/true
+FAIL 点名一个不存在的完整路径 pwsh，不许改用兜底目录里那份
+FAIL 点名一个不存在的相对路径 pwsh，同样不许换
+```
+
+「不许换成另一份 pwsh」那两条必须在**兜底目标真实存在**的前提下测（测试里临时把
+`$env:ProgramFiles` 指向一个造出来的诱饵目录），否则又是一次假通过。
+
+**触发面：** 三个生产调用点当时都不传参，所以路线 C 不会踩到。这是提前堵，不是救火。
+
+---
+
+## B28b `Resolve-DailyTwinPwsh` 的补漏本身又长出了一个同形状的洞
+
+**来源：** B28 补完之后自己复查边界发现的。
+
+B28 那一版修好了「完整路径的非 pwsh 被放行」，但改出来的代码在**被点名的完整路径**这条
+分支上用了 `Get-Command`：
+
+```powershell
+$resolved = Get-Command -Name $Preferred -CommandType Application -ErrorAction SilentlyContinue
+```
+
+`Get-Command` 是个**搜索型**解析器 —— 它会做通配符展开、会去 PATH 上找。而这条分支的语义
+恰恰相反：调用方已经把完整路径写死了，这里要做的是**精确存在性检查**，不是搜索。
+后果是传一个通配符路径（比如 `C:\Program Files\PowerShell\*\pwsh.exe`）时，函数会替调用方
+从命中集合里挑一个返回。这正是 B28 想根除的那件事 —— **点名 X，系统悄悄给了 Y** —— 只是
+换了个地方复发。
+
+另外两个边界也没堵：空串 `''` 会抛参数校验错误（`Get-Command -Name ''`），
+纯空白 `' '` 会一路落进兜底搜索、返回系统里那份 PowerShell 7。
+
+**改法：**
+
+```powershell
+if ([string]::IsNullOrWhiteSpace($Preferred)) { return $null }
+# ... 名字检查不变 ...
+if ([System.Management.Automation.WildcardPattern]::ContainsWildcardCharacters($Preferred)) { return $null }
+if (Test-Path -LiteralPath $Preferred -PathType Leaf) { return $Preferred }
+return $null
+```
+
+`Test-Path -LiteralPath` 才是「精确存在性」的正确工具。
+
+**新增三条断言，其中通配符那条特意造了一个真能被命中的目标**（在 `$workRoot/wild/PowerShell/7/`
+下放一份可执行的 `pwsh.exe`），否则断言又是空的 —— 通配符没东西可命中的话，返回 `$null`
+是因为找不到，不是因为拒绝。
+
+**教训：** 诊断对了不代表工具选对了。B28 的诊断是「不许替调用方挑一个」，而 `Get-Command`
+的天职就是替调用方挑一个。写修复的时候要问一句：我用的这个 API，它的默认行为站在我这一边吗？
+
+---
+
+## B29 快照参数：先幻觉出一个非法组合，再反向幻觉成「参数不存在」
+
+**来源：** 她在真机上跑 OpenClaw `2026.7.1-2` 的 CLI 并翻了安装源码。这一条我自己两次都判错，
+方向还相反。
+
+原来的代码拼的是：
+
+```powershell
+$browserArguments = @('snapshot', '--format', 'aria', '--mode', $SnapshotMode)
+```
+
+**第一次错（幻觉）：** `--format aria` 是猜的。无障碍树确实叫 ARIA，Playwright 也确实有
+`ariaSnapshot`，所以这个词「听起来比正确答案还正确」。文档在这一块是空的，先验就把空白填上了,
+然后我自己写的测试断言「拼出来的字符串等于我想拼的字符串」，把这个猜测锁死了。
+这跟当初的 VS Code 幻觉是同一形状。
+
+**第二次错（矫枉过正）：** 她指出真机拒绝这条命令之后，我去翻文档 —— `/cli/browser` 页面
+只写了 `snapshot` 和 `snapshot --urls`，`openclaw browser snapshot --help` 子命令帮助只显示
+`-h` —— 就据此下了「这些参数根本不存在」的结论。**这是错的：帮助信息不完整不能当作参数不存在
+的证据。** 她的实测把契约说清楚了：
+
+```text
+snapshot --format <aria|ai>
+snapshot --mode <efficient>
+snapshot --efficient
+```
+
+`openclaw browser --help`（父命令，不是子命令）里明确给了
+`openclaw browser snapshot --format aria --limit 200` 和 `openclaw browser snapshot --efficient`。
+
+**真实问题是组合非法：`aria` 和 `efficient` 互斥 —— `--efficient` 要求 `format=ai`。**
+
+**改成三档互不重叠的映射：**
+
+| `-SnapshotMode` | 发出的参数 |
+|---|---|
+| `efficient` | `snapshot --efficient` |
+| `full` | `snapshot --format ai` |
+| `aria` | `snapshot --format aria` |
+
+`full` 不等同于 ARIA —— 是两种不同的提取格式。显式传 `--format` 还有一个我们要的副作用：
+能压住全局 `browser.snapshotDefaults.mode=efficient`（那个默认只在调用方没显式指定时才生效）。
+
+**测试怎么改的，比改了什么更重要。** 原来那种断言的两边是同一个信念，测不出东西。
+现在的做法是**真的把脚本跑起来**，用一个会把 argv 落盘的替身可执行文件顶替 `openclaw`
+（Windows 上是 `.cmd`，其他系统是 `sh`），然后检查真实发出去的命令行。
+最关键的一条断言不是三个映射，而是**任何分支都不许把 `--format aria` 和 `--efficient` 拼在
+一起** —— 那才是真机报错的直接原因，也是最容易再犯的一条。另加一条「不许再出现 `--mode`」，
+把旧写法钉死。
+
+三组负向对照都确认过断言不是空的：
+
+```
+对照 A（改回 --format aria --mode <mode>）：挂 6 条
+对照 B（把顶层 browser.userDataDir 写回去）：挂 1 条
+对照 C（故意拼成 --format aria --efficient）：挂 1 条 —— 就是互斥那条
+```
+
+**仍然只是单元测试。** 沙箱里没有 OpenClaw，替身只能证明「代码路径拼出了这些参数」，
+证明不了「真机接受这些参数」。真实集成验证放在接线那个 PR 里。
+
+---
+
+## B30 往真机配置里写了一个 OpenClaw 根本不读的键
+
+**来源：** 她审查时指出 `Set-OpenClawBrowserProfile.ps1` 写的顶层 `browser.userDataDir` 无效。
+
+脚本原来有个 `-ManagedUserDataDir` 参数，会把它写成 `browser.userDataDir`，文档还建议指到
+D 盘。查文档确认她是对的：`userDataDir` **只存在于** `browser.profiles.<name>.userDataDir`，
+而且是给 `driver: "existing-session"` 用的（附着到一个非默认的 Chromium 用户目录）；
+受管浏览器「仍然使用它自己的用户数据目录」，位置固定：
+
+```text
+%OPENCLAW_HOME%\.openclaw\browser\openclaw\user-data
+```
+
+写一个不被读取的键，等于在回执里承诺一件不会发生的事 —— 用户会以为登录态搬到 D 盘了，
+其实没有。**这一条没有任何技术难度，纯粹是我凭几天前的记忆写的，没回去重读文档。**
+
+**改法：** 参数和写入整段删除。改成如实报告 —— 回执新增 `managedUserDataDir` 字段，
+按当前 `OPENCLAW_HOME` 算出实际路径；没设 `OPENCLAW_HOME` 时给 `null`，不替 OpenClaw 猜默认值。
+`nextSteps` 里也点明备份和磁盘策略该盯哪个路径。
+
+断言改成「这个键压根没被写出来」（检查 `browser` 块的键集合），负向对照 B 确认非空。
+
+---
+
+## B30b `-SnapshotMode full` 会往真机配置里写一个 OpenClaw 不认的全局默认
+
+**来源：** 修 B29 / B30 的时候顺带发现的，她的四条审查意见里没有这一条。
+
+`Set-OpenClawBrowserProfile.ps1` 的 `-SnapshotMode` 原本是 `ValidateSet('efficient','full')`，
+写入位置是 `browser.snapshotDefaults.mode`。但这是个**全局默认**，OpenClaw 只认 `efficient`
+一个值。也就是说 `-SnapshotMode full -Apply` 会把一个非法值写进她真机的 `openclaw.json`。
+
+这跟 B29 是同一个混淆的两面：把「单次调用的格式选择」和「全局默认模式」当成了一件事。
+它们是两个不同的东西：
+
+| | 谁定 | 合法取值 |
+|---|---|---|
+| `browser.snapshotDefaults.mode` | 全局配置 | 只有 `efficient` |
+| `snapshot --format` / `--efficient` | 每次调用 | `--efficient` / `--format ai` / `--format aria` |
+
+**改法：** `Set-OpenClawBrowserProfile.ps1` 的 `-SnapshotMode` 收紧成
+`ValidateSet('efficient')`；`Invoke-DailyTwinBrowser.ps1` 的 `-SnapshotMode` 保持三档。
+自检里加了三条断言，确认 `full` / `aria` / `ai` 传给前者都会被拒。
+
+---
+
+## 这一轮暴露出来的一个模式：谁发现了什么
+
+值得单独记一笔，因为它决定了下一轮该怎么验证。
+
+| 发现者 | 发现的问题 | 性质 |
+|---|---|---|
+| 我自己 | B25 JSON 深度截断、B28b 的假通过陷阱 | 全是**内部一致性**问题 —— 代码和代码自己对不上 |
+| Copilot | B26 假回执、B27 全角空格 | 局部逻辑问题 |
+| **她（真机）** | B28 完整路径、B29 快照参数、B30 无效的 userDataDir | **全是「这跟真实的 OpenClaw / 真实的 Windows 对不对得上」** |
+
+我的验证回路是绕着我自己的假设转的：沙箱跑不了 OpenClaw，于是我把「我拼出的字符串等于我想
+拼的字符串」当成了验证。`139/139` 全绿量的是内部自洽，不是正确性。
+
+**「点名 X，系统悄悄给了 Y」现在有四个成员，应该当成一类来盯：**
+
+1. VS Code 幻觉（点名一个应用，给了另一个路径）
+2. `-Apply -WhatIf` 假回执（点名预览，回执说已落盘）
+3. `Resolve-DailyTwinPwsh` 静默替换（点名一个 pwsh，给了另一个）
+4. 她真机上观察到的 `browser status` 报 `profile: edge` 但 `detectedBrowser: chrome`
+
+第 4 个还没查。
+
 ## 偏离原计划的地方（7 条，全部有意为之）
 
 | # | 偏离 | 原因 |
