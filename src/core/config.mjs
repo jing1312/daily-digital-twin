@@ -122,6 +122,13 @@ export function validateConfig(config) {
   checkPositiveInteger(problems, 'scheduler.pollSeconds', config.scheduler?.pollSeconds);
   checkPositiveInteger(problems, 'scheduler.maxParallelWorkers', config.scheduler?.maxParallelWorkers);
   checkBoolean(problems, 'execution.requireEvidence', config.execution?.requireEvidence);
+  // 中文注释：execution.module 可选。给了就必须是相对私有目录的非空路径字符串，
+  // 中文注释：越界路径（../）会在 executor-loader 解析阶段被拒绝，这里只管类型。
+  if (config.execution?.module !== undefined && config.execution?.module !== null) {
+    if (typeof config.execution.module !== 'string' || config.execution.module.trim().length === 0) {
+      problems.push('execution.module 必须是相对于私有目录的非空路径字符串');
+    }
+  }
 
   if (typeof config.browser?.defaultProfile !== 'string' || config.browser.defaultProfile.trim().length === 0) {
     problems.push('browser.defaultProfile 必须是 profile 名称字符串');
