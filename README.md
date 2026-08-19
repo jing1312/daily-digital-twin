@@ -44,7 +44,7 @@ phone / Feishu          remote model                 Windows machine
 ```
 
 ```text
-src/core/            task state, policy, routing, redaction, verification
+src/core/            task state, policy, routing, redaction, verification, AI planner, AI executor
 src/runtime.mjs      command-line entry point
 platform/windows/    setup, telemetry, backup, repair, and self-test scripts
 config/*.example.*   sanitised example configuration
@@ -90,6 +90,23 @@ npm run runtime -- scheduler status
 npm run runtime -- scheduler enable
 ```
 
+### Morning workflow (v3)
+
+Send all your tasks at once — the AI planner decomposes them into sub-tasks, creates a parent-child task tree, and optionally starts the scheduler:
+
+```powershell
+# Create a task file (one task per line, # for comments)
+npm run runtime -- morning C:\path\to\tasks.txt --enable
+```
+
+Batch import without AI planning:
+
+```powershell
+npm run runtime -- batch C:\path\to\tasks.txt
+```
+
+Configure the AI API in your private `config/runtime.json` (see `config/runtime.example.json`). Without an API configured, tasks pass through as `unknown` type without decomposition.
+
 Read [`docs/RUNBOOK.md`](docs/RUNBOOK.md) before enabling routine execution. Browser-profile behaviour and unattended-operation constraints are documented in [`docs/BROWSER-PROFILES.md`](docs/BROWSER-PROFILES.md).
 
 ## Verification
@@ -120,7 +137,9 @@ npm run selftest:ps
 | Privacy audit and redaction | CI-enforced | Cannot compensate for secrets deliberately committed outside the audited patterns |
 | Scheduler | Dormant by default | Requires fresh CPU and power telemetry before accepting work |
 | Browser routing | Documented and guarded | Some profiles require a human or a separate initial login |
-| Built-in executor | Safe placeholder | Returns `partial`; real machine-specific execution must be configured privately |
+| Built-in executor | AI executor for `ai_call` tasks | `desktop`/`browser` types return `partial`; real machine-specific execution must be configured privately |
+| AI planner | Tested | Decomposes tasks via OpenAI-compatible API; falls back to passthrough when unconfigured |
+| Morning workflow | Tested | Batch import → AI planning → sub-task creation → optional scheduler start |
 | Destructive or external actions | Confirmation-gated | Human approval remains part of the security model |
 
 The repository is an experimental personal automation framework, not a general-purpose autonomous agent or a security-certified product.

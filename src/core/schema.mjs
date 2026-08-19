@@ -1,6 +1,6 @@
 // 中文注释：集中管理 SQLite 连接参数与版本化迁移，避免每个调用方各写一套建表语句。
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 // 中文注释：v1 基础表，保持与首个版本完全一致，便于旧库原地升级。
 const BASE_TABLES = `
@@ -77,6 +77,15 @@ const ADDED_COLUMNS = {
   token_ledger: [['cached_tokens', 'INTEGER NOT NULL DEFAULT 0']]
 };
 
+// 中文注释：v2 -> v3 新增列：parent_task_id 建立父子任务关系，task_type 区分任务类型（ai_call/desktop/browser/unknown）。
+const V3_ADDED_COLUMNS = {
+  tasks: [
+    ['parent_task_id', 'INTEGER'],
+    ['task_type', "TEXT NOT NULL DEFAULT 'unknown'"],
+    ['priority', 'INTEGER NOT NULL DEFAULT 0']
+  ]
+};
+
 // 中文注释：前台动作全局互斥依赖这个部分唯一索引，后台动作 exclusive_class 为 NULL 不受限。
 const V2_INDEXES = `
   CREATE UNIQUE INDEX IF NOT EXISTS resource_locks_one_per_class
@@ -87,7 +96,13 @@ const V2_INDEXES = `
   CREATE INDEX IF NOT EXISTS tasks_state ON tasks (state, paused);
 `;
 
-const KNOWN_TABLES = new Set(Object.keys(ADDED_COLUMNS));
+// 中文注释：v3 新增索引：按父任务查子任务、按类型筛选。
+const V3_INDEXES = `
+  CREATE INDEX IF NOT EXISTS tasks_parent ON tasks (parent_task_id);
+  CREATE INDEX IF NOT EXISTS tasks_type ON tasks (task_type);
+`;
+
+const KNOWN_TABLES = new Set([...Object.keys(ADDED_COLUMNS), ...Object.keys(V3_ADDED_COLUMNS)]);
 
 // 中文注释：判断表是否已存在，用来区分"全新库"和"待升级的旧库"。
 export function tableExists(db, name) {
@@ -158,6 +173,7 @@ export function migrate(db) {
   const addedColumns = [];
   db.exec('BEGIN IMMEDIATE');
   try {
+    // 中文注释：v1 → v2 基础表和列。
     db.exec(BASE_TABLES);
     db.exec(V2_TABLES);
     for (const [table, columns] of Object.entries(ADDED_COLUMNS)) {
@@ -166,6 +182,17 @@ export function migrate(db) {
       }
     }
     db.exec(V2_INDEXES);
+
+    // 中文注释：v2 → v3 父子任务列和索引。
+    if (fromVersion < 3) {
+      for (const [table, columns] of Object.entries(V3_ADDED_COLUMNS)) {
+        for (const [column, definition] of columns) {
+          if (addColumnIfMissing(db, table, column, definition)) addedColumns.push(`${table}.${column}`);
+        }
+      }
+      db.exec(V3_INDEXES);
+    }
+
     writeSchemaVersion(db, SCHEMA_VERSION);
     db.exec('COMMIT');
   } catch (error) {

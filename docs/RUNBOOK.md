@@ -360,6 +360,68 @@ npm run runtime -- daemon              # 前台跑循环，Ctrl+C 停
 
 ---
 
+## 9b. 晨间工作流：批量发任务 → AI 分解 → 调度执行
+
+v3 新增的核心功能。早晨把所有任务写在一个文本文件里，一条命令完成"AI 规划 → 创建父子任务 → 启动调度"。
+
+### 准备任务文件
+
+```text
+# morning-tasks.txt
+# 每行一个任务，# 开头是注释
+写一篇关于 AI 在教育领域应用的博客文章
+整理上周的实验数据并生成图表
+查一下最近 Three.js 的更新日志
+```
+
+### 配置 AI API
+
+编辑 `<私有目录>\config\runtime.json`，填入 `planner` 和 `executor` 段：
+
+```json
+{
+  "planner": {
+    "apiEndpoint": "https://api.openai.com/v1/chat/completions",
+    "apiKey": "你的 Key",
+    "model": "gpt-4o-mini"
+  },
+  "executor": {
+    "apiEndpoint": "https://api.openai.com/v1/chat/completions",
+    "apiKey": "你的 Key",
+    "model": "gpt-4o-mini"
+  }
+}
+```
+
+没配 API 也能跑 —— 任务以 `unknown` 类型透传，不分解，但 `ai-executor` 无法执行（会返回 `partial`）。
+
+### 一键启动
+
+```powershell
+# 只规划和创建，不自动启动调度器
+npm run runtime -- morning C:\path\to\morning-tasks.txt
+
+# 规划 + 创建 + 自动启动调度器
+npm run runtime -- morning C:\path\to\morning-tasks.txt --enable
+```
+
+输出是一个 JSON 计划概览：每个原始任务对应一个父任务，下面挂着 AI 分解出的子任务，
+标注了类型（`ai_call` / `desktop` / `browser`）和优先级。
+
+### 批量导入（不经过 AI）
+
+```powershell
+npm run runtime -- batch C:\path\to\tasks.txt
+```
+
+### AI 执行器说明
+
+- `ai_call` 类型任务：调 AI API 执行，结果保存到 `<私有目录>\data\outputs\` 作为文件证据
+- `desktop` / `browser` 类型：返回 `partial`，需要在私有目录配置对应执行器
+- `unknown` 类型：尝试用 AI 执行（可能能做也可能不能）
+
+---
+
 ## 10. 出问题了怎么退回
 
 | 想退回什么 | 怎么做 |

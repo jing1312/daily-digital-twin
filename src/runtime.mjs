@@ -7,6 +7,9 @@ import { loadConfig, storeOptionsFromConfig, ConfigError, DEFAULT_CONFIG, CONFIG
 import { createSchedulerLoop } from './core/scheduler-loop.mjs';
 import { collectTelemetry, TELEMETRY_HINT } from './core/telemetry.mjs';
 import { decideResourcePolicy } from './core/resource-policy.mjs';
+import { planTasks, groupByParent } from './core/planner.mjs';
+import { createCompositeExecutor } from './core/ai-executor.mjs';
+import { readFile } from 'node:fs/promises';
 
 // 中文注释：所有命令共用同一套 home 解析与配置加载，杜绝 init 写一个目录、status 读另一个目录（修 B13b）。
 
@@ -122,12 +125,8 @@ async function runDaemon(home) {
     store,
     config,
     telemetry: () => daemonTelemetry,
-    // 中文注释：公开仓不内置任何真实执行器 —— 执行器涉及本机软件路径，属于私有配置。
-    executor: async ({ task }) => ({
-      outcome: 'partial',
-      reason: '未配置执行器：请在私有目录提供 executor，本次不谎报成功',
-      summary: `任务 ${task.id} 已被调度，但没有可用执行器`
-    })
+    // 中文注释：使用复合执行器：ai_call 类型由 AI 执行，desktop/browser 返回 partial。
+    executor: await createCompositeExecutor({ home, config })
   });
   const started = loop.start({ keepAlive: true });
   if (!started.started) {
@@ -173,6 +172,101 @@ async function runDoctor(home) {
   });
 }
 
+// 中文注释：从文件读取任务列表，每行一个任务，空行和 # 开头的行跳过。
+async function readTaskFile(filePath) {
+  const raw = await readFile(filePath, 'utf8');
+  return raw.split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('#'));
+}
+
+// 中文注释：批量导入任务。每行一个任务，逐个创建。
+async function batchImport(home, filePath) {
+  const tasks = await readTaskFile(filePath);
+  if (tasks.length === 0) throw new RuntimeCommandError('文件中没有有效任务', 'empty_file');
+  await withStore(home, ({ store }) => {
+    const results = [];
+    for (const request of tasks) {
+      try {
+        results.push(store.createTask({ request }));
+      } catch (error) {
+        results.push({ error: error.message, request });
+      }
+    }
+    print({ imported: results.filter((r) => !r.error).length, failed: results.filter((r) => r.error).length, results });
+  });
+}
+
+// 中文注释：晨间工作流 —— 核心入口。
+// 中文注释：读取任务文件 → 调 AI 规划器分解 → 创建父任务和子任务 → 可选启动调度 → 打出计划概览。
+async function morningWorkflow(home, filePath, enableScheduler) {
+  const tasks = await readTaskFile(filePath);
+  if (tasks.length === 0) throw new RuntimeCommandError('文件中没有有效任务', 'empty_file');
+
+  const { config, source } = await loadConfig(home);
+
+  // 中文注释：第一步：调 AI 规划器分解任务。
+  let plan;
+  try {
+    plan = await planTasks(tasks, config.planner ?? {});
+  } catch (error) {
+    // 中文注释：规划失败不阻止创建任务，降级为透传。
+    print({ warning: `AI 规划失败，降级为透传：${error.message}`, code: error.code });
+    plan = tasks.map((request, index) => ({ parentIndex: index, request, taskType: 'unknown', priority: 1 }));
+  }
+
+  // 中文注释：第二步：创建父任务和子任务。
+  await withStore(home, ({ store }) => {
+    const groups = groupByParent(plan);
+    const taskTree = [];
+
+    for (let index = 0; index < tasks.length; index += 1) {
+      const parentRequest = tasks[index];
+      const parent = store.createTask({ request: parentRequest, taskType: 'unknown', priority: 5 });
+      const subItems = groups.get(index) ?? [];
+      const subTasks = [];
+
+      for (const item of subItems) {
+        try {
+          const sub = store.createSubTask(parent.id, {
+            request: item.request,
+            taskType: item.taskType,
+            priority: item.priority
+          });
+          subTasks.push(sub);
+        } catch (error) {
+          subTasks.push({ error: error.message, request: item.request });
+        }
+      }
+
+      taskTree.push({
+        parent: { id: parent.id, request: parent.request, state: parent.state },
+        subTasks: subTasks.map((s) => s.error ? { error: s.error, request: s.request } : { id: s.id, request: s.request, taskType: s.taskType, priority: s.priority, state: s.state })
+      });
+    }
+
+    // 中文注释：第三步：可选启动调度器。
+    let schedulerAction = null;
+    if (enableScheduler) {
+      const configPath = join(home, CONFIG_FILE);
+      const next = { ...config, scheduler: { ...config.scheduler, enabled: true } };
+      writeFile(configPath, `${JSON.stringify(next, null, 2)}\n`, 'utf8');
+      store.setSetting('scheduler_enabled_changed_at', new Date().toISOString());
+      schedulerAction = { enabled: true, message: '调度器已启用' };
+    }
+
+    // 中文注释：打出计划概览。
+    print({
+      morning: new Date().toISOString(),
+      configSource: source ?? '(使用内置默认值)',
+      originalTaskCount: tasks.length,
+      plannedSubTaskCount: plan.length,
+      taskTree,
+      scheduler: schedulerAction ?? { enabled: config.scheduler.enabled, message: '调度器状态未变（使用 --enable 可自动启动）' }
+    });
+  });
+}
+
 // 中文注释：统一错误出口。默认只打结构化错误，堆栈需要显式开 DAILY_TWIN_DEBUG=1（修 B13c）。
 function reportError(error) {
   const payload = {
@@ -197,6 +291,8 @@ async function main() {
   if (command.command === 'status') return showStatus(home);
   if (command.command === 'scheduler') return manageScheduler(home, command.action);
   if (command.command === 'owner') return manageOwner(home, command.action);
+  if (command.command === 'batch') return batchImport(home, command.filePath);
+  if (command.command === 'morning') return morningWorkflow(home, command.filePath, command.enableScheduler);
   if (command.command === 'daemon') return runDaemon(home);
   if (command.command === 'doctor') return runDoctor(home);
   return updateTask(home, command);

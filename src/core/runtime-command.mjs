@@ -19,6 +19,8 @@ export const USAGE = [
   'runtime pause|resume|cancel <编号>     控制单个任务',
   'runtime scheduler status|enable|disable  查看或切换调度器开关（默认休眠）',
   'runtime owner show|reset               查看或重置飞书归属账号',
+  'runtime batch <文件路径>               从文件批量导入任务（每行一个）',
+  'runtime morning <文件路径> [--enable]   晨间工作流：AI 规划 + 批量创建 + 可选启动调度',
   'runtime daemon                         前台运行调度循环（需先 enable）',
   'runtime doctor                         打印运行环境自检信息'
 ].join('\n');
@@ -99,6 +101,21 @@ export function parseRuntimeCommand(args) {
       throw new RuntimeCommandError(`owner 只接受 ${[...OWNER_ACTIONS].join(' / ')}`, 'invalid_owner_action');
     }
     return withHome({ command, action });
+  }
+
+  // 中文注释：批量导入任务。从文件读取，每行一个任务。
+  if (command === 'batch') {
+    const filePath = tail[0];
+    if (!filePath) throw new RuntimeCommandError('batch 需要文件路径', 'missing_file');
+    return withHome({ command, filePath });
+  }
+
+  // 中文注释：晨间工作流。读取任务文件 → AI 规划分解 → 批量创建父子任务 → 可选启动调度。
+  if (command === 'morning') {
+    const filePath = tail[0];
+    if (!filePath) throw new RuntimeCommandError('morning 需要文件路径', 'missing_file');
+    const enableScheduler = tail.includes('--enable');
+    return withHome({ command, filePath, enableScheduler });
   }
 
   throw new RuntimeCommandError(`未知控制命令：${command ?? '(空)'}\n\n${USAGE}`, 'unknown_command');

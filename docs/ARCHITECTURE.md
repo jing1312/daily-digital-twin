@@ -71,6 +71,8 @@ src/
     scheduler-loop.mjs        The 24/7 loop; dormant by default
     execution-verifier.mjs    Evidence requirements before a task may be "completed"
     browser-router.mjs        Which browser profile a web action may use
+    planner.mjs               AI task decomposition (OpenAI-compatible API)
+    ai-executor.mjs           AI executor for ai_call tasks; composite router by task type
     feishu-adapter.mjs        Message ingress, sender authorisation
     message-router.mjs        Text → intent (new task / verification code / control command)
     runtime-command.mjs       Argv → structured command
@@ -303,7 +305,56 @@ Stated explicitly, because an architecture document that omits its own limits is
 
 ---
 
-## 13. Deferred work
+## 13. Morning workflow and AI integration (v3)
+
+The v3 extension adds the "morning dump" workflow: the user writes all their tasks
+in a text file, and a single command runs the full pipeline.
+
+```
+tasks.txt ──▶ planner.mjs ──▶ TaskStore (parent + sub-tasks) ──▶ scheduler-loop ──▶ ai-executor.mjs
+                 │                    │                              │
+                 │                    │                              │  ai_call → AI API
+                 │                    │                              │  desktop → partial (needs private executor)
+                 │                    │                              │  browser → partial (needs private executor)
+                 │                    │                              ▼
+                 │                    │                        evidence-gated completion
+                 ▼                    ▼
+          OpenAI-compatible       parent_task_id
+          API (untrusted)         task_type, priority
+```
+
+### Planner (`src/core/planner.mjs`)
+
+Takes a list of raw task descriptions, sends them to an OpenAI-compatible chat API with a
+system prompt that asks for decomposition into sub-tasks with type classification
+(`ai_call` / `desktop` / `browser`) and priority (1–5). Returns a validated plan.
+
+When no API is configured, it **passes through** — each task becomes a single `unknown`-type
+sub-task. This is not an error; it lets the system work without an API key, just without
+decomposition.
+
+The planner is **untrusted**: its output is validated structurally (`validatePlan`), and
+`parentIndex` bounds are checked against the original task count. A malformed plan is rejected;
+the morning workflow falls back to passthrough rather than failing.
+
+### AI executor (`src/core/ai-executor.mjs`)
+
+Implements the scheduler-loop executor contract for `ai_call`-type tasks. Calls the AI API,
+saves the output to a file under `data/outputs/`, and returns that file as execution evidence.
+Without file evidence, the task is downgraded to `partial` — the same evidence-gated completion
+rule from §7 applies.
+
+The **composite executor** routes by `task_type`: `ai_call` → AI executor, `desktop` / `browser`
+→ `partial` with a message that the corresponding private executor is needed. This is the
+executor wired into `runtime daemon`.
+
+### Schema v3
+
+Adds `parent_task_id`, `task_type`, and `priority` columns to the `tasks` table. Migration is
+idempotent and backward-compatible: a v2 database upgrades in place, existing tasks get
+`task_type = 'unknown'` and `priority = 0`.
+
+## 14. Deferred work
 
 The full token and context plane — a context compiler, prompt-cache classes with explicit
 stability tiers, and per-worker context namespaces for isolation — is **deferred to a following

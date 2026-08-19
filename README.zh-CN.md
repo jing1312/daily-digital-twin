@@ -92,6 +92,73 @@ npm run runtime -- scheduler enable
 Windows 上由 `platform/windows/Write-DailyTwinTelemetry.ps1` 定期写入 `data/telemetry.json`；
 调试时也可以用 `DAILY_TWIN_CPU_PERCENT` 和 `DAILY_TWIN_ON_AC_POWER` 两个环境变量临时覆盖。
 
+## 晨间工作流：批量发任务 → AI 分解 → 调度执行
+
+这是 v3 新增的核心功能：**早晨把所有任务一次性发给 AI，它帮你分解成子任务并自动调度执行。**
+
+### 1. 准备任务文件
+
+创建一个文本文件，每行一个任务，`#` 开头的行是注释：
+
+```text
+# 今天的任务
+写一篇关于 AI 在教育领域应用的博客文章
+整理上周的实验数据并生成图表
+查一下最近 Three.js 的更新日志
+给团队发一封周报邮件
+```
+
+### 2. 配置 AI API
+
+在私有目录的 `config/runtime.json` 中填入你的 OpenAI 兼容 API：
+
+```json
+{
+  "planner": {
+    "apiEndpoint": "https://api.openai.com/v1/chat/completions",
+    "apiKey": "你的 API Key",
+    "model": "gpt-4o-mini"
+  },
+  "executor": {
+    "apiEndpoint": "https://api.openai.com/v1/chat/completions",
+    "apiKey": "你的 API Key",
+    "model": "gpt-4o-mini"
+  }
+}
+```
+
+没有配置 API 也能用 —— 任务会以 `unknown` 类型透传，不分解。
+
+### 3. 一键启动晨间工作流
+
+```powershell
+# 只规划和创建任务，不自动启动调度器
+npm run runtime -- morning C:\path\to\tasks.txt
+
+# 规划 + 创建 + 自动启动调度器
+npm run runtime -- morning C:\path\to\tasks.txt --enable
+```
+
+AI 会把每个任务分解成 1-4 个子任务，判断每个子任务的类型（`ai_call` / `desktop` / `browser`）和优先级，
+然后创建父子任务并打出计划概览。
+
+### 4. 批量导入（不经过 AI 规划）
+
+如果不需要 AI 分解，只想批量创建任务：
+
+```powershell
+npm run runtime -- batch C:\path\to\tasks.txt
+```
+
+### 任务类型说明
+
+| 类型 | 含义 | 谁来执行 |
+|---|---|---|
+| `ai_call` | 可由 AI 直接完成（写文案、做分析、查资料等） | AI 执行器 |
+| `desktop` | 需要操作桌面软件 | 需配置私有桌面执行器 |
+| `browser` | 需要浏览器操作 | 需配置私有浏览器执行器 |
+| `unknown` | 未分类 | 尝试用 AI 执行 |
+
 ## 不要提交的东西
 
 真实 API Key、飞书 App Secret、网关 token、模型中转地址、Cookie、含真实 Windows 用户名的绝对路径、

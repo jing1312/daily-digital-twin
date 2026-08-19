@@ -55,6 +55,23 @@ export const DEFAULT_CONFIG = {
   },
   execution: {
     requireEvidence: true
+  },
+  // 中文注释：AI 规划器配置。用于 morning 命令的任务分解。
+  // 中文注释：apiEndpoint 和 apiKey 不写真实值，从私有目录的 config/runtime.json 读取。
+  planner: {
+    apiEndpoint: null,
+    apiKey: null,
+    model: 'gpt-4o-mini',
+    directPassthroughThreshold: 0,
+    timeoutMs: 30000
+  },
+  // 中文注释：AI 执行器配置。用于 ai_call 类型任务的实际执行。
+  executor: {
+    apiEndpoint: null,
+    apiKey: null,
+    model: 'gpt-4o-mini',
+    outputDir: 'data/outputs',
+    timeoutMs: 60000
   }
 };
 
@@ -141,6 +158,32 @@ export function validateConfig(config) {
   }
 
   if (problems.length > 0) throw new ConfigError(problems);
+
+  // 中文注释：校验 planner 配置。
+  if (config.planner) {
+    if (typeof config.planner.apiEndpoint !== 'string' && config.planner.apiEndpoint !== null) {
+      problems.push('planner.apiEndpoint 必须是字符串或 null');
+    }
+    if (typeof config.planner.apiKey !== 'string' && config.planner.apiKey !== null) {
+      problems.push('planner.apiKey 必须是字符串或 null');
+    }
+    if (typeof config.planner.model !== 'string' || config.planner.model.trim().length === 0) {
+      problems.push('planner.model 必须是非空字符串');
+    }
+  }
+
+  // 中文注释：校验 executor 配置。
+  if (config.executor) {
+    if (typeof config.executor.apiEndpoint !== 'string' && config.executor.apiEndpoint !== null) {
+      problems.push('executor.apiEndpoint 必须是字符串或 null');
+    }
+    if (typeof config.executor.apiKey !== 'string' && config.executor.apiKey !== null) {
+      problems.push('executor.apiKey 必须是字符串或 null');
+    }
+    if (typeof config.executor.model !== 'string' || config.executor.model.trim().length === 0) {
+      problems.push('executor.model 必须是非空字符串');
+    }
+  }
 
   // 中文注释：maxSlots 是对外唯一入口，同步进 resource 供资源策略使用，避免两处不一致。
   config.resource.maxSlots = config.maxSlots;

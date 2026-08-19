@@ -6,6 +6,9 @@ const OPEN_STATES = ['queued', 'running', 'waiting_for_user', 'retrying'];
 const FAILURE_STATES = new Set(['failed', 'partial', 'retrying']);
 export const VERIFICATION_REASON = '需要验证码';
 
+// 中文注释：已支持的任务类型。ai_call 表示可由 AI 直接完成的任务，desktop/browser 需要本机执行。
+export const TASK_TYPES = new Set(['unknown', 'ai_call', 'desktop', 'browser']);
+
 const TRANSITIONS = {
   queued: new Set(['running', 'cancelled']),
   running: new Set(['queued', 'waiting_for_user', 'retrying', 'completed', 'partial', 'failed', 'cancelled']),
@@ -56,6 +59,9 @@ function mapTask(row) {
     attempt: Number(row.attempt ?? 0),
     resumeState: row.resume_state ?? null,
     ownerOpenId: row.owner_open_id ?? null,
+    parentTaskId: row.parent_task_id ?? null,
+    taskType: row.task_type ?? 'unknown',
+    priority: Number(row.priority ?? 0),
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
@@ -114,8 +120,10 @@ export class TaskStore {
   }
 
   // 中文注释：创建任务。槽位只统计"未暂停的未结束任务"，暂停即让出槽位（修 B2）。
-  createTask({ request, ownerOpenId = null } = {}) {
+  // 中文注释：v3 新增 taskType、priority、parentTaskId 参数，支持父子任务关系。
+  createTask({ request, ownerOpenId = null, taskType = 'unknown', priority = 0, parentTaskId = null } = {}) {
     if (!request?.trim()) throw new Error('任务内容不能为空');
+    if (!TASK_TYPES.has(taskType)) throw new Error(`任务类型必须是 ${[...TASK_TYPES].join(' / ')}，实际为 ${taskType}`);
     return this.writeTransaction(() => {
       if (this.countRunnableTasks() >= this.options.maxSlots) {
         throw new Error(`最多同时保留四个活跃任务（当前上限 ${this.options.maxSlots}）`);
@@ -125,13 +133,65 @@ export class TaskStore {
       }
       const timestamp = now();
       const result = this.db.prepare(`
-        INSERT INTO tasks (request, state, created_at, updated_at, owner_open_id)
-        VALUES (?, 'queued', ?, ?, ?)
-      `).run(request.trim(), timestamp, timestamp, ownerOpenId);
+        INSERT INTO tasks (request, state, created_at, updated_at, owner_open_id, task_type, priority, parent_task_id)
+        VALUES (?, 'queued', ?, ?, ?, ?, ?, ?)
+      `).run(request.trim(), timestamp, timestamp, ownerOpenId, taskType, Number(priority) || 0, parentTaskId);
       const taskId = Number(result.lastInsertRowid);
       this.recordEvent(taskId, 'queued', null);
       return this.getTask(taskId);
     });
+  }
+
+
+  // 中文注释：创建子任务。父任务必须存在；子任务继承父任务的 owner。
+  // 中文注释：子任务不受 maxSlots 限制（由父任务占槽），但仍受 openTaskLimit 约束。
+  createSubTask(parentTaskId, { request, taskType = 'unknown', priority = 0 } = {}) {
+    if (!request?.trim()) throw new Error('子任务内容不能为空');
+    if (!TASK_TYPES.has(taskType)) throw new Error(`任务类型必须是 ${[...TASK_TYPES].join(' / ')}，实际为 ${taskType}`);
+    return this.writeTransaction(() => {
+      const parent = this.requireTask(parentTaskId);
+      if (this.countOpenTasks() >= this.options.openTaskLimit) {
+        throw new Error(`未结束任务已达上限 ${this.options.openTaskLimit}，请先取消或完成部分任务`);
+      }
+      const timestamp = now();
+      const result = this.db.prepare(`
+        INSERT INTO tasks (request, state, created_at, updated_at, owner_open_id, task_type, priority, parent_task_id)
+        VALUES (?, 'queued', ?, ?, ?, ?, ?, ?)
+      `).run(request.trim(), timestamp, timestamp, parent.ownerOpenId, taskType, Number(priority) || 0, parent.id);
+      const taskId = Number(result.lastInsertRowid);
+      this.recordEvent(taskId, 'queued', `子任务，父任务 ${parentTaskId}`);
+      return this.getTask(taskId);
+    });
+  }
+
+  // 中文注释：列出某父任务的所有子任务。
+  listSubTasks(parentTaskId) {
+    return this.db.prepare(`
+      SELECT * FROM tasks WHERE parent_task_id = ? ORDER BY priority DESC, id ASC
+    `).all(parentTaskId).map(mapTask);
+  }
+
+  // 中文注释：列出所有顶层任务（没有父任务的），用于晨间概览。
+  listTopLevelTasks() {
+    return this.db.prepare(`
+      SELECT * FROM tasks WHERE parent_task_id IS NULL ORDER BY priority DESC, id ASC
+    `).all().map(mapTask);
+  }
+
+  // 中文注释：获取完整任务树：顶层任务 + 各自的子任务。
+  getTaskTree() {
+    const topLevel = this.listTopLevelTasks();
+    return topLevel.map((task) => ({
+      ...task,
+      subTasks: this.listSubTasks(task.id)
+    }));
+  }
+
+  // 中文注释：检查某父任务的所有子任务是否都已到达终态。
+  allSubTasksCompleted(parentTaskId) {
+    const subTasks = this.listSubTasks(parentTaskId);
+    if (subTasks.length === 0) return true;
+    return subTasks.every((task) => TERMINAL_STATES.has(task.state));
   }
 
   // 中文注释：按状态机推进任务。reason/summary 只在显式传入时写入，终态不再擦除既有原因（修 B9）。
@@ -228,7 +288,7 @@ export class TaskStore {
   // 中文注释：列出可被调度器领取的任务，排除已暂停任务。
   listRunnableTasks() {
     return this.db.prepare(`
-      SELECT * FROM tasks WHERE paused = 0 AND state IN (${OPEN_STATES.map(() => '?').join(', ')}) ORDER BY id ASC
+      SELECT * FROM tasks WHERE paused = 0 AND state IN (${OPEN_STATES.map(() => '?').join(', ')}) ORDER BY priority DESC, id ASC
     `).all(...OPEN_STATES).map(mapTask);
   }
 

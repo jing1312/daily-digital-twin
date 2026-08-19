@@ -44,5 +44,21 @@
   },
   "execution": {
     "requireEvidence": true
+  },
+  "planner": {
+    "_comment": "AI 规划器：用于 morning 命令的任务分解。把 apiEndpoint 和 apiKey 填上你的 OpenAI 兼容 API。",
+    "apiEndpoint": null,
+    "apiKey": null,
+    "model": "gpt-4o-mini",
+    "directPassthroughThreshold": 0,
+    "timeoutMs": 30000
+  },
+  "executor": {
+    "_comment": "AI 执行器：用于 ai_call 类型任务的实际执行。可以和 planner 用同一个 API。",
+    "apiEndpoint": null,
+    "apiKey": null,
+    "model": "gpt-4o-mini",
+    "outputDir": "data/outputs",
+    "timeoutMs": 60000
   }
 }
