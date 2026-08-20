@@ -238,7 +238,7 @@ export class TaskStore {
   listCompletedTasks(limit = 20) {
     return this.db.prepare(`
       SELECT * FROM tasks WHERE state IN ('completed', 'partial', 'failed', 'cancelled')
-      ORDER BY updated_at DESC LIMIT ?
+      ORDER BY updated_at DESC, id DESC LIMIT ?
     `).all(Math.max(1, Number(limit) || 20)).map(mapTask);
   }
 

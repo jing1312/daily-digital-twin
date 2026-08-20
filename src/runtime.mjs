@@ -81,7 +81,7 @@ async function showStatus(home) {
 
 // 中文注释：暂停、继续、取消。目标任务不存在时给出可读错误而不是把 null 传进数据库（修 B4）。
 async function updateTask(home, command) {
-  await withStore(home, ({ store }) => {
+  await withStore(home, async ({ store }) => {
     const task = store.getTask(command.taskId);
     if (!task) throw new RuntimeCommandError(`任务 ${command.taskId} 不存在`, 'task_not_found');
     if (command.command === 'pause') return print(store.pause(task.id));
@@ -113,7 +113,7 @@ async function manageScheduler(home, action) {
 
 // 中文注释：查看或重置飞书归属账号。重置只能在本机执行，远程消息无法触发。
 async function manageOwner(home, action) {
-  await withStore(home, ({ store }) => {
+  await withStore(home, async ({ store }) => {
     if (action === 'reset') return print({ reset: true, ...store.resetOwner() });
     const owner = store.getOwner();
     print({ paired: Boolean(owner), ownerOpenId: owner ? `${owner.slice(0, 4)}***` : null });
@@ -187,7 +187,7 @@ async function readTaskFile(filePath) {
 async function batchImport(home, filePath) {
   const tasks = await readTaskFile(filePath);
   if (tasks.length === 0) throw new RuntimeCommandError('文件中没有有效任务', 'empty_file');
-  await withStore(home, ({ store }) => {
+  await withStore(home, async ({ store }) => {
     const results = [];
     for (const request of tasks) {
       try {
@@ -232,7 +232,7 @@ async function morningWorkflow(home, filePath, enableScheduler, dryRun = false) 
   }
 
   // 中文注释：第二步：创建父任务和子任务。
-  await withStore(home, ({ store }) => {
+  await withStore(home, async ({ store }) => {
     const groups = groupByParent(plan);
     const taskTree = [];
 
@@ -285,21 +285,21 @@ async function morningWorkflow(home, filePath, enableScheduler, dryRun = false) 
 
 // 中文注释：F3：查看完整任务树。
 async function showTree(home) {
-  await withStore(home, ({ store }) => {
+  await withStore(home, async ({ store }) => {
     print({ tree: store.getTaskTree() });
   });
 }
 
 // 中文注释：F4：查看已结束任务。
 async function showHistory(home, limit) {
-  await withStore(home, ({ store }) => {
+  await withStore(home, async ({ store }) => {
     print({ history: store.listCompletedTasks(limit) });
   });
 }
 
 // 中文注释：F4：查看单个任务详情。
 async function showTask(home, taskId) {
-  await withStore(home, ({ store }) => {
+  await withStore(home, async ({ store }) => {
     const detail = store.getTaskDetail(taskId);
     if (!detail) throw new RuntimeCommandError(`任务 ${taskId} 不存在`, 'task_not_found');
     print(detail);
@@ -308,7 +308,7 @@ async function showTask(home, taskId) {
 
 // 中文注释：F5：查看全局 token 用量汇总。
 async function showCost(home) {
-  await withStore(home, ({ store }) => {
+  await withStore(home, async ({ store }) => {
     print({ tokenUsage: store.totalTokenUsage() });
   });
 }

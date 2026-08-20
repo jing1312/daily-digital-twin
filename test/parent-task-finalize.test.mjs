@@ -12,7 +12,7 @@ try {
 const canRun = Boolean(TaskStore);
 
 function createStore() {
-  return new TaskStore(':memory:');
+  return new TaskStore(':memory:', { maxSlots: 100, openTaskLimit: 100 });
 }
 
 describe('F1 — 父任务自动收尾', { skip: !canRun }, () => {
