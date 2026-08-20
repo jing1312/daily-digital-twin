@@ -93,7 +93,7 @@ async function callChatAPI({ apiEndpoint, apiKey, model, messages, timeoutMs }) 
         'Content-Type': 'application/json',
         Authorization: `Bearer ${apiKey}`
       },
-      body: JSON.stringify({ model, messages, temperature: 0.3 }),
+      body: JSON.stringify({ model, messages, temperature: 0.3, response_format: { type: 'json_object' } }),
       signal: controller.signal
     });
 

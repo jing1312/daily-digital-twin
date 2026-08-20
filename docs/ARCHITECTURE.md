@@ -84,7 +84,7 @@ platform/windows/             11 PowerShell scripts: setup, telemetry, backup, r
 scripts/                      Privacy audit, PowerShell linter, lexical scanner
 ```
 
-Roughly 2,500 lines of application code and 132 tests. The largest module (`task-store.mjs`,
+Roughly 2,500 lines of application code and 138 tests. The largest module (`task-store.mjs`,
 495 lines) is the one holding all the invariants; everything else is deliberately small enough
 to read in one sitting.
 
@@ -259,7 +259,7 @@ Four independent layers, because each catches a class the others cannot:
 
 | Layer | Command | What only this layer catches |
 |---|---|---|
-| Unit tests (132) | `npm test` | Logic invariants, migration correctness, redaction |
+| Unit tests (138) | `npm test` | Logic invariants, migration correctness, redaction |
 | Privacy audit | `npm run audit:privacy` | Secrets or personal paths about to be committed |
 | CLI smoke test | `npm run smoke` | End-to-end behaviour, including *absence* of side effects |
 | PowerShell lint + self-test | `npm run lint:ps`, `npm run selftest:ps` | 5.1 syntax, encoding, runtime behaviour of scripts |

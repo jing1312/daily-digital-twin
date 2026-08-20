@@ -86,7 +86,10 @@ async function updateTask(home, command) {
     if (!task) throw new RuntimeCommandError(`任务 ${command.taskId} 不存在`, 'task_not_found');
     if (command.command === 'pause') return print(store.pause(task.id));
     if (command.command === 'resume') return print(store.resume(task.id));
-    return print(store.transition(task.id, 'cancelled', { reason: '用户取消' }));
+    // 中文注释：F2：取消父任务时级联取消所有未结束的子任务。
+    const cancelledSubTasks = store.cancelSubTasks(task.id, { reason: '父任务已取消' });
+    const result = store.transition(task.id, 'cancelled', { reason: '用户取消' });
+    return print({ ...result, cancelledSubTasks: cancelledSubTasks.length > 0 ? cancelledSubTasks : undefined });
   });
 }
 
@@ -199,7 +202,7 @@ async function batchImport(home, filePath) {
 
 // 中文注释：晨间工作流 —— 核心入口。
 // 中文注释：读取任务文件 → 调 AI 规划器分解 → 创建父任务和子任务 → 可选启动调度 → 打出计划概览。
-async function morningWorkflow(home, filePath, enableScheduler) {
+async function morningWorkflow(home, filePath, enableScheduler, dryRun = false) {
   const tasks = await readTaskFile(filePath);
   if (tasks.length === 0) throw new RuntimeCommandError('文件中没有有效任务', 'empty_file');
 
@@ -213,6 +216,19 @@ async function morningWorkflow(home, filePath, enableScheduler) {
     // 中文注释：规划失败不阻止创建任务，降级为透传。
     print({ warning: `AI 规划失败，降级为透传：${error.message}`, code: error.code });
     plan = tasks.map((request, index) => ({ parentIndex: index, request, taskType: 'unknown', priority: 1 }));
+  }
+
+  // 中文注释：F6：dry-run 模式只打规划结果，不建任务。
+  if (dryRun) {
+    print({
+      dryRun: true,
+      morning: new Date().toISOString(),
+      originalTaskCount: tasks.length,
+      plannedSubTaskCount: plan.length,
+      plan: plan.map((item) => ({ ...item, parentRequest: tasks[item.parentIndex] })),
+      message: 'dry-run 模式：未创建任何任务。去掉 --dry-run 执行。'
+    });
+    return;
   }
 
   // 中文注释：第二步：创建父任务和子任务。
@@ -250,7 +266,7 @@ async function morningWorkflow(home, filePath, enableScheduler) {
     if (enableScheduler) {
       const configPath = join(home, CONFIG_FILE);
       const next = { ...config, scheduler: { ...config.scheduler, enabled: true } };
-      writeFile(configPath, `${JSON.stringify(next, null, 2)}\n`, 'utf8');
+      await writeFile(configPath, `${JSON.stringify(next, null, 2)}\n`, 'utf8');
       store.setSetting('scheduler_enabled_changed_at', new Date().toISOString());
       schedulerAction = { enabled: true, message: '调度器已启用' };
     }
@@ -264,6 +280,36 @@ async function morningWorkflow(home, filePath, enableScheduler) {
       taskTree,
       scheduler: schedulerAction ?? { enabled: config.scheduler.enabled, message: '调度器状态未变（使用 --enable 可自动启动）' }
     });
+  });
+}
+
+// 中文注释：F3：查看完整任务树。
+async function showTree(home) {
+  await withStore(home, ({ store }) => {
+    print({ tree: store.getTaskTree() });
+  });
+}
+
+// 中文注释：F4：查看已结束任务。
+async function showHistory(home, limit) {
+  await withStore(home, ({ store }) => {
+    print({ history: store.listCompletedTasks(limit) });
+  });
+}
+
+// 中文注释：F4：查看单个任务详情。
+async function showTask(home, taskId) {
+  await withStore(home, ({ store }) => {
+    const detail = store.getTaskDetail(taskId);
+    if (!detail) throw new RuntimeCommandError(`任务 ${taskId} 不存在`, 'task_not_found');
+    print(detail);
+  });
+}
+
+// 中文注释：F5：查看全局 token 用量汇总。
+async function showCost(home) {
+  await withStore(home, ({ store }) => {
+    print({ tokenUsage: store.totalTokenUsage() });
   });
 }
 
@@ -292,7 +338,11 @@ async function main() {
   if (command.command === 'scheduler') return manageScheduler(home, command.action);
   if (command.command === 'owner') return manageOwner(home, command.action);
   if (command.command === 'batch') return batchImport(home, command.filePath);
-  if (command.command === 'morning') return morningWorkflow(home, command.filePath, command.enableScheduler);
+  if (command.command === 'morning') return morningWorkflow(home, command.filePath, command.enableScheduler, command.dryRun);
+  if (command.command === 'tree') return showTree(home);
+  if (command.command === 'history') return showHistory(home, command.limit);
+  if (command.command === 'show') return showTask(home, command.taskId);
+  if (command.command === 'cost') return showCost(home);
   if (command.command === 'daemon') return runDaemon(home);
   if (command.command === 'doctor') return runDoctor(home);
   return updateTask(home, command);

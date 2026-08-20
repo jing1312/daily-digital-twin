@@ -2,6 +2,8 @@ import { canSchedule } from './scheduler.mjs';
 import { getRetryPlan } from './retry-policy.mjs';
 import { finalizeTask, recordExecutionEvidence } from './execution-verifier.mjs';
 
+const TERMINAL_STATES = new Set(['completed', 'partial', 'failed', 'cancelled']);
+
 // 中文注释：真正执行任务的调度循环。原先只有 canSchedule 这个判断函数，没有任何东西会去跑任务（修 B16）。
 // 中文注释：默认休眠 —— config.scheduler.enabled 为 false 时 start() 直接拒绝，必须由用户手动启用。
 
@@ -56,28 +58,40 @@ export function createSchedulerLoop({
 
     const outcome = result?.outcome ?? 'failed';
 
+    let runResult;
     if (outcome === 'waiting_for_user') {
       store.transition(task.id, 'waiting_for_user', { reason: result?.reason ?? '需要人工确认' });
       store.releaseLocks(task.id);
-      return { taskId: task.id, outcome, attempt };
-    }
-
-    if (outcome === 'completed' || outcome === 'partial') {
+      runResult = { taskId: task.id, outcome, attempt };
+    } else if (outcome === 'completed' || outcome === 'partial') {
       const finalized = finalizeTask(store, task.id, {
         summary: result?.summary ?? null,
         requireEvidence: config?.execution?.requireEvidence !== false && outcome === 'completed'
       });
-      return { taskId: task.id, outcome: finalized.state, attempt, verified: finalized.verified };
+      runResult = { taskId: task.id, outcome: finalized.state, attempt, verified: finalized.verified };
+    } else {
+      const plan = getRetryPlan(attempt, config?.retries);
+      if (plan) {
+        store.transition(task.id, 'retrying', { reason: result?.reason ?? '瞬时失败，准备重试' });
+        store.releaseLocks(task.id);
+        runResult = { taskId: task.id, outcome: 'retrying', attempt, retryInSeconds: plan.delaySeconds };
+      } else {
+        store.transition(task.id, 'failed', { reason: result?.reason ?? '重试次数已用尽' });
+        runResult = { taskId: task.id, outcome: 'failed', attempt };
+      }
     }
 
-    const plan = getRetryPlan(attempt, config?.retries);
-    if (plan) {
-      store.transition(task.id, 'retrying', { reason: result?.reason ?? '瞬时失败，准备重试' });
-      store.releaseLocks(task.id);
-      return { taskId: task.id, outcome: 'retrying', attempt, retryInSeconds: plan.delaySeconds };
+    // 中文注释：F1：子任务到终态后检查父任务是否可以自动收尾。
+    if (task.parentTaskId && TERMINAL_STATES.has(runResult.outcome)) {
+      try {
+        const parentFinalized = store.finalizeParentTask(task.parentTaskId);
+        if (parentFinalized) runResult.parentFinalized = { taskId: parentFinalized.id, state: parentFinalized.state };
+      } catch (error) {
+        logger.error?.(`父任务 ${task.parentTaskId} 自动收尾失败：${error.message}`);
+      }
     }
-    store.transition(task.id, 'failed', { reason: result?.reason ?? '重试次数已用尽' });
-    return { taskId: task.id, outcome: 'failed', attempt };
+
+    return runResult;
   }
 
   // 中文注释：单次调度。测试直接调 tick()，不需要真正起定时器。

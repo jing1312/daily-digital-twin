@@ -194,6 +194,88 @@ export class TaskStore {
     return subTasks.every((task) => TERMINAL_STATES.has(task.state));
   }
 
+  // 中文注释：F1：当子任务全部到终态时自动收尾父任务。
+  // 中文注释：任一子任务 failed/partial 则父任务标记 partial，否则 completed。
+  // 中文注释：父任务已在终态时跳过，不重复操作。
+  finalizeParentTask(parentTaskId) {
+    return this.writeTransaction(() => {
+      const parent = this.getTask(parentTaskId);
+      if (!parent) return null;
+      if (TERMINAL_STATES.has(parent.state)) return parent;
+      if (!this.allSubTasksCompleted(parentTaskId)) return null;
+
+      const subTasks = this.listSubTasks(parentTaskId);
+      const anyFailed = subTasks.some((t) => t.state === 'failed' || t.state === 'partial');
+      const nextState = anyFailed ? 'partial' : 'completed';
+      const summary = anyFailed
+        ? `${subTasks.filter((t) => t.state === 'completed').length}/${subTasks.length} 子任务完成，部分失败`
+        : `${subTasks.length} 个子任务全部完成`;
+
+      const assignments = ['state = ?', 'summary = ?', 'updated_at = ?'];
+      const values = [nextState, summary, now()];
+      values.push(parent.id);
+      this.db.prepare(`UPDATE tasks SET ${assignments.join(', ')} WHERE id = ?`).run(...values);
+      this.recordEvent(parent.id, nextState, summary);
+      this.releaseLocks(parent.id);
+      return this.getTask(parent.id);
+    });
+  }
+
+  // 中文注释：F2：取消父任务时级联取消所有未结束的子任务。
+  cancelSubTasks(parentTaskId, { reason = '父任务已取消' } = {}) {
+    const subTasks = this.listSubTasks(parentTaskId);
+    const cancelled = [];
+    for (const sub of subTasks) {
+      if (!TERMINAL_STATES.has(sub.state)) {
+        this.transition(sub.id, 'cancelled', { reason });
+        cancelled.push(sub.id);
+      }
+    }
+    return cancelled;
+  }
+
+  // 中文注释：F4：列出已结束任务（completed/partial/failed/cancelled），按更新时间倒序，支持 limit。
+  listCompletedTasks(limit = 20) {
+    return this.db.prepare(`
+      SELECT * FROM tasks WHERE state IN ('completed', 'partial', 'failed', 'cancelled')
+      ORDER BY updated_at DESC LIMIT ?
+    `).all(Math.max(1, Number(limit) || 20)).map(mapTask);
+  }
+
+  // 中文注释：F4：获取单个任务的完整详情，含事件、执行证据和 token 用量。
+  getTaskDetail(taskId) {
+    const task = this.getTask(taskId);
+    if (!task) return null;
+    const events = this.listEvents(taskId);
+    const evidence = this.listExecutionEvidence(taskId);
+    const tokenSummary = this.summarizeTokenUsage(taskId);
+    const subTasks = task.parentTaskId ? null : this.listSubTasks(taskId);
+    return { task, events, evidence, tokenSummary, subTasks };
+  }
+
+  // 中文注释：F5：全局 token 用量汇总（所有任务）。
+  totalTokenUsage() {
+    const row = this.db.prepare(`
+      SELECT COUNT(*) AS calls,
+             COALESCE(SUM(input_tokens), 0) AS inputTokens,
+             COALESCE(SUM(cached_tokens), 0) AS cachedTokens,
+             COALESCE(SUM(output_tokens), 0) AS outputTokens,
+             COALESCE(SUM(cache_hit), 0) AS cacheHits,
+             COALESCE(SUM(estimated_cost), 0) AS estimatedCost,
+             COUNT(DISTINCT task_id) AS taskCount
+      FROM token_ledger
+    `).get();
+    return {
+      calls: Number(row.calls),
+      inputTokens: Number(row.inputTokens),
+      cachedTokens: Number(row.cachedTokens),
+      outputTokens: Number(row.outputTokens),
+      cacheHits: Number(row.cacheHits),
+      estimatedCost: Number(row.estimatedCost),
+      taskCount: Number(row.taskCount)
+    };
+  }
+
   // 中文注释：按状态机推进任务。reason/summary 只在显式传入时写入，终态不再擦除既有原因（修 B9）。
   transition(taskId, nextState, options = {}) {
     return this.writeTransaction(() => {

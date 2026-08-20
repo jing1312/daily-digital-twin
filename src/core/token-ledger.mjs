@@ -6,8 +6,8 @@ export function ensureTokenLedger(db) {
   return migrate(db);
 }
 
-// 中文注释：写入结构化 Token 账本，供成本、缓存命中率和延迟分析使用。
-// 中文注释：推荐直接用 TaskStore#recordTokenUsage —— 它已接入任务收尾流程。
+// 中文注释：@deprecated 请改用 TaskStore#recordTokenUsage —— 它已接入任务收尾流程，且自带事务保护。
+// 中文注释：这个独立函数保留仅为向后兼容，后续版本可能移除。
 export function recordTokenUsage(db, usage) {
   ensureTokenLedger(db);
   db.prepare(`
