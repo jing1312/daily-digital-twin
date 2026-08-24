@@ -1,6 +1,6 @@
 // 中文注释：解析飞书文本为本机控制动作，避免验证码落盘或被误当成新任务。
 
-const TASK_REFERENCE = '(?:DT-\\d{8}-\\d{4}|\\d+)';
+const TASK_REFERENCE = '(?:DT-\\d{8}-\\d{4,}|\\d+)';
 const COMMAND_PATTERN = new RegExp(`^(状态|暂停|继续|取消|看证据)(?:\\s*(${TASK_REFERENCE}))?$`, 'i');
 const QUALIFIED_CODE_PATTERN = new RegExp(`^任务\\s*(${TASK_REFERENCE})\\s*[：:]\\s*(\\d{4,10})$`, 'i');
 const BARE_CODE_PATTERN = /^\d{4,10}$/;
