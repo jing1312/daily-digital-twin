@@ -28,6 +28,27 @@ test('电池或资源不足时收缩执行槽并拒绝新动作', () => {
   }), { slotLimit: 0, acceptsNewActions: false, reason: '资源不足' });
 });
 
+test('可用内存按 10GB/6GB/4GB 自适应为 4/2/1 个重型槽位', () => {
+  const base = { onAcPower: true, cpuPercent: 20, diskFreeGb: 80 };
+  assert.equal(decideResourcePolicy({ ...base, availableMemoryGb: 10 }).slotLimit, 4);
+  assert.equal(decideResourcePolicy({ ...base, availableMemoryGb: 9.9 }).slotLimit, 2);
+  assert.equal(decideResourcePolicy({ ...base, availableMemoryGb: 6 }).slotLimit, 2);
+  assert.equal(decideResourcePolicy({ ...base, availableMemoryGb: 4.6 }).slotLimit, 1);
+  assert.equal(decideResourcePolicy({ ...base, availableMemoryGb: 3.9 }).slotLimit, 0);
+  assert.equal(decideResourcePolicy({ ...base, availableMemoryGb: 3.9 }).acceptsNewActions, false);
+});
+
+test('电池模式不会绕过内存和磁盘硬门槛', () => {
+  const lowMemory = decideResourcePolicy({
+    onAcPower: false,
+    cpuPercent: 20,
+    availableMemoryGb: 3.9,
+    diskFreeGb: 80
+  });
+  assert.equal(lowMemory.slotLimit, 0);
+  assert.equal(lowMemory.acceptsNewActions, false);
+});
+
 test('回执只记录脱敏证据而不保留验证码', () => {
   const receipt = createReceipt({
     taskId: 12,

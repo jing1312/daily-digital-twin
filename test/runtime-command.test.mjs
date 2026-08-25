@@ -93,3 +93,17 @@ test('daemon 与 doctor 命令可解析', () => {
   assert.deepEqual(parseRuntimeCommand(['daemon']), { command: 'daemon' });
   assert.deepEqual(parseRuntimeCommand(['doctor']), { command: 'doctor' });
 });
+
+test('MCP 支持固定 Multica worker slot，且不能同时传任意 binding 路径', () => {
+  assert.deepEqual(parseRuntimeCommand(['mcp', '--binding-slot', 'dt-worker-1']), {
+    command: 'mcp', bindingSlot: 'dt-worker-1'
+  });
+  assert.throws(
+    () => parseRuntimeCommand(['mcp', '--binding', 'data/a.json', '--binding-slot', 'dt-worker-1']),
+    (error) => error.code === 'conflicting_binding_source'
+  );
+  assert.throws(
+    () => parseRuntimeCommand(['mcp', '--binding-slot', '..\\escape']),
+    (error) => error.code === 'invalid_binding_slot'
+  );
+});

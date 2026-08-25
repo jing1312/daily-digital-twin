@@ -16,14 +16,22 @@ export const USAGE = [
   'runtime init [--home <目录>]           初始化私有运行目录',
   'runtime create <任务描述> [--home ..]  创建任务',
   'runtime status [--home ..]             查看未结束任务',
-  'runtime pause|resume|cancel <编号>     控制单个任务',
+  'runtime tree [--home ..]               查看完整任务树（含父子关系）',
+  'runtime history [--limit N] [--home ..] 查看已结束任务（默认最近 20 条）',
+  'runtime show <编号> [--home ..]        查看单个任务详情（含事件、证据、token 用量）',
+  'runtime cost [--home ..]               查看 token 用量汇总',
+  'runtime pause|resume|cancel <编号>     控制单个任务（cancel 父任务会级联取消子任务）',
   'runtime scheduler status|enable|disable  查看或切换调度器开关（默认休眠）',
   'runtime owner show|reset               查看或重置飞书归属账号',
+  'runtime batch <文件路径>               从文件批量导入任务（每行一个）',
+  'runtime morning <文件路径> [--enable] [--dry-run]  晨间工作流：AI 规划 + 批量创建 + 可选启动调度',
   'runtime daemon                         前台运行调度循环（需先 enable）',
+  'runtime serve                          启动飞书 + Multica + 本机控制平面',
+  'runtime mcp --binding-slot <worker>    启动绑定到 Multica worker 的高层 MCP（stdio）',
   'runtime doctor                         打印运行环境自检信息'
 ].join('\n');
 
-// 中文注释：抽出 --home，其余位置参数原样保留，保证任务正文不被拆坏。
+// 中文注释：抽出 --home 和其他 flags，其余位置参数原样保留，保证任务正文不被拆坏。
 function extractHome(args) {
   const rest = [];
   let home = null;
@@ -59,6 +67,37 @@ function parseTaskId(raw, command) {
   return value;
 }
 
+// 中文注释：从 tail 中提取 --limit N 参数，默认 20。
+function parseLimit(tail, defaultValue = 20) {
+  const idx = tail.indexOf('--limit');
+  if (idx !== -1 && tail[idx + 1]) {
+    const n = Number.parseInt(tail[idx + 1], 10);
+    if (Number.isSafeInteger(n) && n > 0) return n;
+  }
+  return defaultValue;
+}
+
+// 中文注释：提取 `--name value` 或 `--name=value` 形式的参数（PR #2 引入，供 mcp 命令使用）。
+function extractValue(args, name) {
+  const prefix = `${name}=`;
+  for (let index = 0; index < args.length; index += 1) {
+    const value = args[index];
+    if (value === name) {
+      const next = args[index + 1];
+      if (!next || String(next).startsWith('--')) {
+        throw new RuntimeCommandError(`${name} 需要一个路径参数`, `missing_${name.slice(2).replaceAll('-', '_')}_value`);
+      }
+      return String(next);
+    }
+    if (String(value).startsWith(prefix)) {
+      const next = String(value).slice(prefix.length);
+      if (!next) throw new RuntimeCommandError(`${name} 需要一个路径参数`, `missing_${name.slice(2).replaceAll('-', '_')}_value`);
+      return next;
+    }
+  }
+  return null;
+}
+
 export function parseRuntimeCommand(args) {
   const { home, rest } = extractHome(Array.isArray(args) ? args : []);
   const [command, ...tail] = rest;
@@ -74,8 +113,32 @@ export function parseRuntimeCommand(args) {
     return withHome({ command, taskId: parseTaskId(tail[0], command) });
   }
 
-  if (command === 'status' || command === 'daemon' || command === 'doctor') {
+  // 中文注释：PR #2：mcp 命令，启动绑定到 Multica worker 的高层 MCP。
+  if (command === 'mcp') {
+    const binding = extractValue(tail, '--binding');
+    const bindingSlot = extractValue(tail, '--binding-slot');
+    if (binding && bindingSlot) {
+      throw new RuntimeCommandError('--binding 与 --binding-slot 不能同时使用', 'conflicting_binding_source');
+    }
+    if (bindingSlot && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(bindingSlot)) {
+      throw new RuntimeCommandError('binding slot 名称非法', 'invalid_binding_slot');
+    }
+    return withHome(binding ? { command, binding } : (bindingSlot ? { command, bindingSlot } : { command }));
+  }
+
+  if (command === 'status' || command === 'daemon' || command === 'serve' || command === 'doctor' || command === 'tree' || command === 'cost') {
     return withHome({ command });
+  }
+
+  // 中文注释：F4：history 命令，查看已结束任务，支持 --limit。
+  if (command === 'history') {
+    const limit = parseLimit(tail, 20);
+    return withHome({ command, limit });
+  }
+
+  // 中文注释：F4：show 命令，查看单个任务详情。
+  if (command === 'show') {
+    return withHome({ command, taskId: parseTaskId(tail[0], command) });
   }
 
   if (command === 'init') {
@@ -99,6 +162,23 @@ export function parseRuntimeCommand(args) {
       throw new RuntimeCommandError(`owner 只接受 ${[...OWNER_ACTIONS].join(' / ')}`, 'invalid_owner_action');
     }
     return withHome({ command, action });
+  }
+
+  // 中文注释：批量导入任务。从文件读取，每行一个任务。
+  if (command === 'batch') {
+    const filePath = tail[0];
+    if (!filePath) throw new RuntimeCommandError('batch 需要文件路径', 'missing_file');
+    return withHome({ command, filePath });
+  }
+
+  // 中文注释：晨间工作流。读取任务文件 → AI 规划分解 → 批量创建父子任务 → 可选启动调度。
+  // 中文注释：F6：--dry-run 只打规划结果不建任务。
+  if (command === 'morning') {
+    const filePath = tail[0];
+    if (!filePath) throw new RuntimeCommandError('morning 需要文件路径', 'missing_file');
+    const enableScheduler = tail.includes('--enable');
+    const dryRun = tail.includes('--dry-run');
+    return withHome({ command, filePath, enableScheduler, dryRun });
   }
 
   throw new RuntimeCommandError(`未知控制命令：${command ?? '(空)'}\n\n${USAGE}`, 'unknown_command');

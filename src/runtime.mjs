@@ -1,5 +1,7 @@
-import { mkdir, writeFile, access } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdir, writeFile, access, readFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { randomBytes } from 'node:crypto';
 import { TaskStore } from './core/task-store.mjs';
 import { parseRuntimeCommand, RuntimeCommandError, USAGE } from './core/runtime-command.mjs';
 import { resolveHome, databasePath, HOME_DIRECTORIES, HOME_ENV } from './core/home.mjs';
@@ -8,12 +10,16 @@ import { createSchedulerLoop } from './core/scheduler-loop.mjs';
 import { collectTelemetry, TELEMETRY_HINT } from './core/telemetry.mjs';
 import { decideResourcePolicy } from './core/resource-policy.mjs';
 import { loadExecutor, placeholderExecutor, describeExecutor, ExecutorLoadError } from './core/executor-loader.mjs';
+import { planTasks, groupByParent } from './core/planner.mjs';
+import { createCompositeExecutor } from './core/ai-executor.mjs';
 
 // 中文注释：所有命令共用同一套 home 解析与配置加载，杜绝 init 写一个目录、status 读另一个目录（修 B13b）。
 
 function print(payload) {
   console.log(JSON.stringify(payload, null, 2));
 }
+
+const REPOSITORY_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
 async function fileExists(path) {
   try {
@@ -24,20 +30,41 @@ async function fileExists(path) {
   }
 }
 
+async function writeNewFile(path, content) {
+  try {
+    await writeFile(path, content, { encoding: 'utf8', flag: 'wx' });
+    return true;
+  } catch (error) {
+    if (error?.code === 'EEXIST') return false;
+    throw error;
+  }
+}
+
 // 中文注释：创建私有目录结构，并写入一份可编辑的默认配置。
 async function initializeHome(home) {
   await Promise.all(HOME_DIRECTORIES.map((directory) => mkdir(join(home, directory), { recursive: true })));
   const configPath = join(home, CONFIG_FILE);
-  let configWritten = false;
-  if (!(await fileExists(configPath))) {
-    await writeFile(configPath, `${JSON.stringify(DEFAULT_CONFIG, null, 2)}\n`, 'utf8');
-    configWritten = true;
-  }
+  const configWritten = await writeNewFile(configPath, `${JSON.stringify(DEFAULT_CONFIG, null, 2)}\n`);
+  const appsWritten = await writeNewFile(
+    join(home, 'config', 'apps.json'),
+    await readFile(join(REPOSITORY_ROOT, 'config', 'apps.example.json'), 'utf8')
+  );
+  const pricingWritten = await writeNewFile(
+    join(home, 'config', 'pricing.json'),
+    await readFile(join(REPOSITORY_ROOT, 'config', 'pricing.example.json'), 'utf8')
+  );
+  const capabilitySecretWritten = await writeNewFile(
+    join(home, 'config', 'capability-hmac.secret'),
+    `${randomBytes(32).toString('hex')}\n`
+  );
   print({
     home,
     directories: HOME_DIRECTORIES,
     configPath: CONFIG_FILE,
     configWritten,
+    appsWritten,
+    pricingWritten,
+    capabilitySecretWritten,
     schedulerEnabled: DEFAULT_CONFIG.scheduler.enabled,
     initializedAt: new Date().toISOString()
   });
@@ -79,12 +106,15 @@ async function showStatus(home) {
 
 // 中文注释：暂停、继续、取消。目标任务不存在时给出可读错误而不是把 null 传进数据库（修 B4）。
 async function updateTask(home, command) {
-  await withStore(home, ({ store }) => {
+  await withStore(home, async ({ store }) => {
     const task = store.getTask(command.taskId);
     if (!task) throw new RuntimeCommandError(`任务 ${command.taskId} 不存在`, 'task_not_found');
     if (command.command === 'pause') return print(store.pause(task.id));
     if (command.command === 'resume') return print(store.resume(task.id));
-    return print(store.transition(task.id, 'cancelled', { reason: '用户取消' }));
+    // 中文注释：F2：取消父任务时级联取消所有未结束的子任务。
+    const cancelledSubTasks = store.cancelSubTasks(task.id, { reason: '父任务已取消' });
+    const result = store.transition(task.id, 'cancelled', { reason: '用户取消' });
+    return print({ ...result, cancelledSubTasks: cancelledSubTasks.length > 0 ? cancelledSubTasks : undefined });
   });
 }
 
@@ -108,7 +138,7 @@ async function manageScheduler(home, action) {
 
 // 中文注释：查看或重置飞书归属账号。重置只能在本机执行，远程消息无法触发。
 async function manageOwner(home, action) {
-  await withStore(home, ({ store }) => {
+  await withStore(home, async ({ store }) => {
     if (action === 'reset') return print({ reset: true, ...store.resetOwner() });
     const owner = store.getOwner();
     print({ paired: Boolean(owner), ownerOpenId: owner ? `${owner.slice(0, 4)}***` : null });
@@ -144,7 +174,9 @@ async function runDaemon(home) {
     store,
     config,
     telemetry: () => daemonTelemetry,
-    executor
+    // 中文注释：使用复合执行器：ai_call 类型由 AI 执行；desktop/browser 类型
+    // 中文注释：优先交给私有执行器（executor-loader 装载），没有就如实报 partial。
+    executor: await createCompositeExecutor({ home, config, delegate: executor })
   });
   const started = loop.start({ keepAlive: true });
   if (!started.started) {
@@ -168,6 +200,44 @@ async function runDaemon(home) {
     store.close();
     process.exit(0);
   });
+}
+
+function installShutdown(close) {
+  let closing = false;
+  const shutdown = async () => {
+    if (closing) return;
+    closing = true;
+    try {
+      await close();
+      process.exitCode = 0;
+    } catch (error) {
+      reportError(error);
+    }
+  };
+  process.once('SIGINT', shutdown);
+  process.once('SIGTERM', shutdown);
+}
+
+async function runProductionServer(home) {
+  const { buildProductionRuntime } = await import('./production-runtime.mjs');
+  const runtime = await buildProductionRuntime({ home });
+  const status = await runtime.supervisor.start();
+  installShutdown(() => runtime.supervisor.stop());
+  print({
+    status: 'started',
+    mode: 'serve',
+    home,
+    scheduler: status.scheduler,
+    message: '飞书网关、Daily Twin 调度器和 Multica 同步桥已启动。'
+  });
+}
+
+async function runMcpServer(home, bindingPath = null, bindingSlot = null) {
+  const { buildMcpRuntime } = await import('./production-runtime.mjs');
+  const slotPath = bindingSlot ? `data/workers/slots/${bindingSlot}/capability.binding.json` : null;
+  const runtime = await buildMcpRuntime({ home, bindingPath: bindingPath ?? slotPath });
+  // 中文注释：MCP stdio 的 stdout 是协议通道，不能打印启动提示或日志。
+  installShutdown(() => runtime.close());
 }
 
 // 中文注释：环境自检。把 home、配置来源、WAL、归属账号、调度开关、遥测状态一次性打出来。
@@ -197,6 +267,144 @@ async function runDoctor(home) {
   });
 }
 
+// 中文注释：从文件读取任务列表，每行一个任务，空行和 # 开头的行跳过。
+async function readTaskFile(filePath) {
+  const raw = await readFile(filePath, 'utf8');
+  return raw.split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('#'));
+}
+
+// 中文注释：批量导入任务。每行一个任务，逐个创建。
+async function batchImport(home, filePath) {
+  const tasks = await readTaskFile(filePath);
+  if (tasks.length === 0) throw new RuntimeCommandError('文件中没有有效任务', 'empty_file');
+  await withStore(home, async ({ store }) => {
+    const results = [];
+    for (const request of tasks) {
+      try {
+        results.push(store.createTask({ request }));
+      } catch (error) {
+        results.push({ error: error.message, request });
+      }
+    }
+    print({ imported: results.filter((r) => !r.error).length, failed: results.filter((r) => r.error).length, results });
+  });
+}
+
+// 中文注释：晨间工作流 —— 核心入口。
+// 中文注释：读取任务文件 → 调 AI 规划器分解 → 创建父任务和子任务 → 可选启动调度 → 打出计划概览。
+async function morningWorkflow(home, filePath, enableScheduler, dryRun = false) {
+  const tasks = await readTaskFile(filePath);
+  if (tasks.length === 0) throw new RuntimeCommandError('文件中没有有效任务', 'empty_file');
+
+  const { config, source } = await loadConfig(home);
+
+  // 中文注释：第一步：调 AI 规划器分解任务。
+  let plan;
+  try {
+    plan = await planTasks(tasks, config.planner ?? {});
+  } catch (error) {
+    // 中文注释：规划失败不阻止创建任务，降级为透传。
+    print({ warning: `AI 规划失败，降级为透传：${error.message}`, code: error.code });
+    plan = tasks.map((request, index) => ({ parentIndex: index, request, taskType: 'unknown', priority: 1 }));
+  }
+
+  // 中文注释：F6：dry-run 模式只打规划结果，不建任务。
+  if (dryRun) {
+    print({
+      dryRun: true,
+      morning: new Date().toISOString(),
+      originalTaskCount: tasks.length,
+      plannedSubTaskCount: plan.length,
+      plan: plan.map((item) => ({ ...item, parentRequest: tasks[item.parentIndex] })),
+      message: 'dry-run 模式：未创建任何任务。去掉 --dry-run 执行。'
+    });
+    return;
+  }
+
+  // 中文注释：第二步：创建父任务和子任务。
+  await withStore(home, async ({ store }) => {
+    const groups = groupByParent(plan);
+    const taskTree = [];
+
+    for (let index = 0; index < tasks.length; index += 1) {
+      const parentRequest = tasks[index];
+      const parent = store.createTask({ request: parentRequest, taskType: 'unknown', priority: 5 });
+      const subItems = groups.get(index) ?? [];
+      const subTasks = [];
+
+      for (const item of subItems) {
+        try {
+          const sub = store.createSubTask(parent.id, {
+            request: item.request,
+            taskType: item.taskType,
+            priority: item.priority
+          });
+          subTasks.push(sub);
+        } catch (error) {
+          subTasks.push({ error: error.message, request: item.request });
+        }
+      }
+
+      taskTree.push({
+        parent: { id: parent.id, request: parent.request, state: parent.state },
+        subTasks: subTasks.map((s) => s.error ? { error: s.error, request: s.request } : { id: s.id, request: s.request, taskType: s.taskType, priority: s.priority, state: s.state })
+      });
+    }
+
+    // 中文注释：第三步：可选启动调度器。
+    let schedulerAction = null;
+    if (enableScheduler) {
+      const configPath = join(home, CONFIG_FILE);
+      const next = { ...config, scheduler: { ...config.scheduler, enabled: true } };
+      await writeFile(configPath, `${JSON.stringify(next, null, 2)}\n`, 'utf8');
+      store.setSetting('scheduler_enabled_changed_at', new Date().toISOString());
+      schedulerAction = { enabled: true, message: '调度器已启用' };
+    }
+
+    // 中文注释：打出计划概览。
+    print({
+      morning: new Date().toISOString(),
+      configSource: source ?? '(使用内置默认值)',
+      originalTaskCount: tasks.length,
+      plannedSubTaskCount: plan.length,
+      taskTree,
+      scheduler: schedulerAction ?? { enabled: config.scheduler.enabled, message: '调度器状态未变（使用 --enable 可自动启动）' }
+    });
+  });
+}
+
+// 中文注释：F3：查看完整任务树。
+async function showTree(home) {
+  await withStore(home, async ({ store }) => {
+    print({ tree: store.getTaskTree() });
+  });
+}
+
+// 中文注释：F4：查看已结束任务。
+async function showHistory(home, limit) {
+  await withStore(home, async ({ store }) => {
+    print({ history: store.listCompletedTasks(limit) });
+  });
+}
+
+// 中文注释：F4：查看单个任务详情。
+async function showTask(home, taskId) {
+  await withStore(home, async ({ store }) => {
+    const detail = store.getTaskDetail(taskId);
+    if (!detail) throw new RuntimeCommandError(`任务 ${taskId} 不存在`, 'task_not_found');
+    print(detail);
+  });
+}
+
+// 中文注释：F5：查看全局 token 用量汇总。
+async function showCost(home) {
+  await withStore(home, async ({ store }) => {
+    print({ tokenUsage: store.totalTokenUsage() });
+  });
+}
+
 // 中文注释：统一错误出口。默认只打结构化错误，堆栈需要显式开 DAILY_TWIN_DEBUG=1（修 B13c）。
 function reportError(error) {
   const payload = {
@@ -221,7 +429,15 @@ async function main() {
   if (command.command === 'status') return showStatus(home);
   if (command.command === 'scheduler') return manageScheduler(home, command.action);
   if (command.command === 'owner') return manageOwner(home, command.action);
+  if (command.command === 'batch') return batchImport(home, command.filePath);
+  if (command.command === 'morning') return morningWorkflow(home, command.filePath, command.enableScheduler, command.dryRun);
+  if (command.command === 'tree') return showTree(home);
+  if (command.command === 'history') return showHistory(home, command.limit);
+  if (command.command === 'show') return showTask(home, command.taskId);
+  if (command.command === 'cost') return showCost(home);
   if (command.command === 'daemon') return runDaemon(home);
+  if (command.command === 'serve') return runProductionServer(home);
+  if (command.command === 'mcp') return runMcpServer(home, command.binding ?? null, command.bindingSlot ?? null);
   if (command.command === 'doctor') return runDoctor(home);
   return updateTask(home, command);
 }

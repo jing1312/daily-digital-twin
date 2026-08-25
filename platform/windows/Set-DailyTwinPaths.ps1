@@ -47,7 +47,10 @@ if ($homeQualifier -ieq $systemDrive) {
 }
 
 # ---- 1. 建目录 ----
-$relativeDirectories = @('data\tasks', 'data\receipts', 'data\screenshots', 'data\cache', 'data\logs', 'config', 'backups')
+$relativeDirectories = @(
+    'data\tasks', 'data\receipts', 'data\screenshots', 'data\cache', 'data\logs',
+    'data\workers', 'data\locks', 'config', 'backups'
+)
 foreach ($relative in $relativeDirectories) {
     $directory = Join-Path $PrivateHome $relative
     if (-not (Test-Path -LiteralPath $directory)) {

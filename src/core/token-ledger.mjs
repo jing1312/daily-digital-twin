@@ -6,14 +6,25 @@ export function ensureTokenLedger(db) {
   return migrate(db);
 }
 
-// 中文注释：写入结构化 Token 账本，供成本、缓存命中率和延迟分析使用。
-// 中文注释：推荐直接用 TaskStore#recordTokenUsage —— 它已接入任务收尾流程。
+// 中文注释：@deprecated 请改用 TaskStore#recordTokenUsage —— 它已接入任务收尾流程，且自带事务保护。
+// 中文注释：这个独立函数保留仅为向后兼容，后续版本可能移除。
 export function recordTokenUsage(db, usage) {
   ensureTokenLedger(db);
   db.prepare(`
     INSERT INTO token_ledger
-      (task_id, worker_id, model, input_tokens, cached_tokens, output_tokens, cache_hit, latency_ms, estimated_cost, recorded_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (task_id, worker_id, model, input_tokens, cached_tokens, output_tokens, cache_hit,
+       latency_ms, estimated_cost, external_usage_id, recorded_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(task_id, external_usage_id) WHERE external_usage_id IS NOT NULL DO UPDATE SET
+      worker_id = excluded.worker_id,
+      model = excluded.model,
+      input_tokens = excluded.input_tokens,
+      cached_tokens = excluded.cached_tokens,
+      output_tokens = excluded.output_tokens,
+      cache_hit = excluded.cache_hit,
+      latency_ms = excluded.latency_ms,
+      estimated_cost = excluded.estimated_cost,
+      recorded_at = excluded.recorded_at
   `).run(
     usage.taskId,
     String(usage.workerId ?? 'local'),
@@ -24,6 +35,7 @@ export function recordTokenUsage(db, usage) {
     usage.cacheHit ? 1 : 0,
     Number(usage.latencyMs ?? 0),
     usage.estimatedCost ?? null,
+    usage.usageId ? String(usage.usageId) : null,
     new Date().toISOString()
   );
 }

@@ -31,10 +31,10 @@ echo "ok   仓库目录里没有生成 runtime/ 或数据库"
 echo "--- 2. init 之后 create / status 共用同一个数据库 ---"
 "${RUNTIME[@]}" init --home "$PRIVATE_HOME" > "$WORK/init.json"
 grep -q '"configWritten": true' "$WORK/init.json"
-for directory in data/tasks data/receipts data/screenshots data/cache data/logs config backups; do
+for directory in data/tasks data/receipts data/screenshots data/cache data/logs data/workers data/locks config backups; do
   test -d "$PRIVATE_HOME/$directory" || { echo "FAIL：缺少目录 $directory"; exit 1; }
 done
-echo "ok   7 个私有子目录都建好了"
+echo "ok   9 个私有子目录都建好了"
 
 "${RUNTIME[@]}" create --home "$PRIVATE_HOME" '打开 Biomni' > "$WORK/create.json"
 grep -q '"state": "queued"' "$WORK/create.json"

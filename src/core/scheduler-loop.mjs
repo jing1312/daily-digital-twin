@@ -2,6 +2,8 @@ import { canSchedule } from './scheduler.mjs';
 import { getRetryPlan } from './retry-policy.mjs';
 import { finalizeTask, recordExecutionEvidence } from './execution-verifier.mjs';
 
+const TERMINAL_STATES = new Set(['completed', 'partial', 'failed', 'cancelled']);
+
 // 中文注释：真正执行任务的调度循环。原先只有 canSchedule 这个判断函数，没有任何东西会去跑任务（修 B16）。
 // 中文注释：默认休眠 —— config.scheduler.enabled 为 false 时 start() 直接拒绝，必须由用户手动启用。
 
@@ -16,7 +18,8 @@ export function createSchedulerLoop({
   executor,
   telemetry = null,
   logger = console,
-  requiresForeground = () => false
+  requiresForeground = () => false,
+  eligibleTask = () => true
 } = {}) {
   if (!store) throw new Error('调度循环需要 store');
   if (typeof executor !== 'function') throw new Error('调度循环需要 executor 函数');
@@ -24,7 +27,8 @@ export function createSchedulerLoop({
   const schedulerConfig = config?.scheduler ?? {};
   const enabled = schedulerConfig.enabled === true;
   let timer = null;
-  let running = false;
+  let claiming = false;
+  const activeJobs = new Set();
 
   // 中文注释：读取遥测。没有遥测提供者就返回空对象，资源策略会因此失败关闭（符合 B6 的修法）。
   function readTelemetry() {
@@ -38,7 +42,7 @@ export function createSchedulerLoop({
   }
 
   async function runOne(task) {
-    const attempt = store.bumpAttempt(task.id);
+    let attempt = Number(task.attempt ?? 0);
     let result = null;
     try {
       result = await executor({ task, store, config });
@@ -56,37 +60,61 @@ export function createSchedulerLoop({
 
     const outcome = result?.outcome ?? 'failed';
 
+    let runResult;
     if (outcome === 'waiting_for_user') {
       store.transition(task.id, 'waiting_for_user', { reason: result?.reason ?? '需要人工确认' });
       store.releaseLocks(task.id);
-      return { taskId: task.id, outcome, attempt };
-    }
-
-    if (outcome === 'completed' || outcome === 'partial') {
+      runResult = { taskId: task.id, outcome, attempt };
+    } else if (outcome === 'partial') {
+      const partialTask = store.transition(task.id, 'partial', {
+        summary: result?.summary ?? null,
+        reason: result?.reason ?? '仅完成部分步骤'
+      });
+      runResult = { taskId: partialTask.id, outcome: partialTask.state, attempt, verified: false };
+    } else if (outcome === 'completed') {
       const finalized = finalizeTask(store, task.id, {
         summary: result?.summary ?? null,
-        requireEvidence: config?.execution?.requireEvidence !== false && outcome === 'completed'
+        requireEvidence: config?.execution?.requireEvidence !== false
       });
-      return { taskId: task.id, outcome: finalized.state, attempt, verified: finalized.verified };
+      runResult = { taskId: task.id, outcome: finalized.state, attempt, verified: finalized.verified };
+    } else {
+      attempt = store.bumpAttempt(task.id);
+      const plan = getRetryPlan(attempt, config?.retries);
+      if (plan) {
+        store.scheduleRetry(task.id, {
+          delaySeconds: plan.delaySeconds,
+          reason: result?.reason ?? '瞬时失败，准备重试'
+        });
+        store.releaseLocks(task.id);
+        runResult = { taskId: task.id, outcome: 'retrying', attempt, retryInSeconds: plan.delaySeconds };
+      } else {
+        store.transition(task.id, 'failed', { reason: result?.reason ?? '重试次数已用尽' });
+        runResult = { taskId: task.id, outcome: 'failed', attempt };
+      }
     }
 
-    const plan = getRetryPlan(attempt, config?.retries);
-    if (plan) {
-      store.transition(task.id, 'retrying', { reason: result?.reason ?? '瞬时失败，准备重试' });
-      store.releaseLocks(task.id);
-      return { taskId: task.id, outcome: 'retrying', attempt, retryInSeconds: plan.delaySeconds };
+    // 中文注释：F1：子任务到终态后检查父任务是否可以自动收尾。
+    if (task.parentTaskId && TERMINAL_STATES.has(runResult.outcome)) {
+      try {
+        const parentFinalized = store.finalizeParentTask(task.parentTaskId);
+        if (parentFinalized) runResult.parentFinalized = { taskId: parentFinalized.id, state: parentFinalized.state };
+      } catch (error) {
+        logger.error?.(`父任务 ${task.parentTaskId} 自动收尾失败：${error.message}`);
+      }
     }
-    store.transition(task.id, 'failed', { reason: result?.reason ?? '重试次数已用尽' });
-    return { taskId: task.id, outcome: 'failed', attempt };
+
+    return runResult;
   }
 
   // 中文注释：单次调度。测试直接调 tick()，不需要真正起定时器。
   async function tick() {
-    if (running) return { skipped: true, reason: 'tick_in_progress' };
-    running = true;
+    if (claiming) return { skipped: true, reason: 'claim_in_progress' };
+    claiming = true;
+    let jobs = [];
+    let policy = null;
     try {
-      const policy = canSchedule({
-        activeCount: 0,
+      policy = canSchedule({
+        activeCount: activeJobs.size,
         foregroundBusy: false,
         requiresForeground: false,
         resource: readTelemetry(),
@@ -94,31 +122,35 @@ export function createSchedulerLoop({
       });
       if (!policy.allowed) return { picked: 0, reason: policy.reason, policy: policy.policy };
 
-      const candidates = store.listRunnableTasks().filter((task) => task.state === 'queued' || task.state === 'retrying');
+      const candidates = store.listRunnableTasks().filter((task) => (
+        (task.state === 'queued' || task.state === 'retrying') && eligibleTask(task)
+      ));
       if (candidates.length === 0) return { picked: 0, reason: 'no_runnable_tasks', policy: policy.policy };
 
       const parallelLimit = Math.min(
-        Number(schedulerConfig.maxParallelWorkers ?? 2),
-        Number(policy.policy.slotLimit ?? 1)
+        Math.max(0, Number(schedulerConfig.maxParallelWorkers ?? 2) - activeJobs.size),
+        Math.max(0, Number(policy.policy.slotLimit ?? 1) - activeJobs.size)
       );
-      const results = [];
-      for (const task of candidates.slice(0, Math.max(1, parallelLimit))) {
+      if (parallelLimit <= 0) return { picked: 0, reason: '执行槽已满', policy: policy.policy };
+      jobs = candidates.slice(0, parallelLimit).map((task) => {
         const needsForeground = Boolean(requiresForeground(task));
         const lock = store.tryAcquireLock(task.id, `task:${task.id}`, {
           exclusiveClass: needsForeground ? FOREGROUND_CLASS : null
         });
         if (!lock.ok) {
-          results.push({ taskId: task.id, outcome: 'skipped', reason: lock.code, holderTaskId: lock.holderTaskId });
-          continue;
+          return Promise.resolve({ taskId: task.id, outcome: 'skipped', reason: lock.code, holderTaskId: lock.holderTaskId });
         }
-        if (task.state === 'retrying') store.transition(task.id, 'running');
-        else store.transition(task.id, 'running');
-        results.push(await runOne(store.getTask(task.id)));
-      }
-      return { picked: results.length, results, policy: policy.policy };
+        store.transition(task.id, 'running');
+        activeJobs.add(task.id);
+        return runOne(store.getTask(task.id)).finally(() => activeJobs.delete(task.id));
+      });
     } finally {
-      running = false;
+      claiming = false;
     }
+    // 中文注释：领取阶段结束后立即允许下一次 tick 使用剩余槽位；当前 tick 仍等待自己
+    // 中文注释：启动的任务，以保持调用方既有的结果契约。
+    const results = await Promise.all(jobs);
+    return { picked: results.length, results, policy: policy.policy };
   }
 
   // 中文注释：启动定时循环。默认休眠，未启用时明确拒绝并说明如何开启。
@@ -131,6 +163,7 @@ export function createSchedulerLoop({
       };
     }
     if (timer) return { started: true, alreadyRunning: true };
+    store.recoverInterruptedDeterministicTasks?.();
     const intervalMs = Math.max(1, Number(schedulerConfig.pollSeconds ?? 5)) * 1000;
     timer = setInterval(() => {
       tick().catch((error) => logger.error?.(`调度循环异常：${error.message}`));
