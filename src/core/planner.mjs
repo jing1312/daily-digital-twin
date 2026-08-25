@@ -94,7 +94,9 @@ async function callChatAPI({ apiEndpoint, apiKey, model, messages, timeoutMs, re
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`
+        Authorization: `Bearer ${apiKey}`,
+        // 中文注释：部分中转站按 User-Agent 放行客户端（实测缺失时 401），统一标识为 codex CLI。
+        'User-Agent': 'codex_cli_rs/0.21.0'
       },
       body: JSON.stringify(payload),
       signal: controller.signal

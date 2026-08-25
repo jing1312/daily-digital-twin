@@ -23,6 +23,11 @@ const DEFAULT_PORT = 18791;
 // 中文注释：推理力度档位。null/空 = 不给 API 传 reasoning_effort 参数。
 export const REASONING_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh'];
 
+// 中文注释：部分中转站按客户端特征放行（实测 ps.air-outer.com 只认 codex/claude CLI 的
+// 中文注释：User-Agent，其余一律 401 "unauthorized client detected"）。这里统一带上，
+// 中文注释：runtime 侧的 ai-executor / planner 也使用同一常量。
+export const CLIENT_USER_AGENT = 'codex_cli_rs/0.21.0';
+
 // 中文注释：网址补全。用户习惯只填到 /v1，甚至只填域名——这里统一补成
 // 中文注释：完整的 chat/completions 接口地址；已经写全的保持原样。
 // 中文注释：返回 null 表示输入为空。
@@ -108,7 +113,7 @@ export async function testChatEndpoint({ apiEndpoint, apiKey, model, reasoningEf
     if (reasoningEffort) payload.reasoning_effort = reasoningEffort;
     const response = await fetch(endpoint, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}`, 'User-Agent': CLIENT_USER_AGENT },
       body: JSON.stringify(payload),
       signal: controller.signal
     });
@@ -141,7 +146,7 @@ export async function fetchModelList({ apiEndpoint, apiKey }) {
   const timer = setTimeout(() => controller.abort(), 12000);
   try {
     const response = await fetch(modelsUrl, {
-      headers: { Authorization: `Bearer ${apiKey}` },
+      headers: { Authorization: `Bearer ${apiKey}`, 'User-Agent': CLIENT_USER_AGENT },
       signal: controller.signal
     });
     const raw = await response.text().catch(() => '');
