@@ -188,6 +188,13 @@ export function validateConfig(config) {
   checkIntegerInRange(problems, 'scheduler.maxForegroundTasks', config.scheduler?.maxForegroundTasks, 1, 1);
   checkBoolean(problems, 'execution.requireEvidence', config.execution?.requireEvidence);
   checkPositiveInteger(problems, 'execution.workerMaxMinutes', config.execution?.workerMaxMinutes);
+  // 中文注释：execution.module 可选（PR #7）。给了就必须是相对私有目录的非空路径字符串，
+  // 中文注释：越界路径（../）会在 executor-loader 解析阶段被拒绝，这里只管类型。
+  if (config.execution?.module !== undefined && config.execution?.module !== null) {
+    if (typeof config.execution.module !== 'string' || config.execution.module.trim().length === 0) {
+      problems.push('execution.module 必须是相对于私有目录的非空路径字符串');
+    }
+  }
 
   if (config.browser?.defaultBrowser !== 'msedge') problems.push('browser.defaultBrowser 必须固定为 msedge');
   checkBoolean(problems, 'browser.extension', config.browser?.extension);

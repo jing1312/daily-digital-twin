@@ -162,8 +162,10 @@ export async function createAIExecutor({ home = null, config = {} } = {}) {
 }
 
 // 中文注释：复合执行器：根据任务类型分发到不同执行器。
-// 中文注释：目前只内置 ai-executor；desktop 和 browser 类型返回 partial 等待对应执行器。
-export async function createCompositeExecutor({ home = null, config = {} } = {}) {
+// 中文注释：内置 ai-executor 处理 ai_call / unknown；desktop 和 browser 优先交给
+// 中文注释：私有执行器（PR #7 的 executor-loader 装载结果，经 delegate 传入），
+// 中文注释：没有私有执行器时如实返回 partial。
+export async function createCompositeExecutor({ home = null, config = {}, delegate = null } = {}) {
   const aiExecutor = await createAIExecutor({ home, config });
 
   return async function compositeExecutor({ task, store, config: runtimeConfig }) {
@@ -172,6 +174,12 @@ export async function createCompositeExecutor({ home = null, config = {} } = {})
     // 中文注释：ai_call 类型交给 AI 执行器。
     if (taskType === 'ai_call') {
       return aiExecutor({ task, store, config: runtimeConfig });
+    }
+
+    // 中文注释：desktop / browser 类型优先走私有执行器（遵循 executor 契约），
+    // 中文注释：异常统一抛出，由 scheduler-loop 兜底转 failed。
+    if ((taskType === 'desktop' || taskType === 'browser') && typeof delegate === 'function') {
+      return delegate({ task, store, config: runtimeConfig });
     }
 
     // 中文注释：desktop 和 browser 类型暂未实现，诚实报告。

@@ -9,6 +9,7 @@ import { loadConfig, storeOptionsFromConfig, ConfigError, DEFAULT_CONFIG, CONFIG
 import { createSchedulerLoop } from './core/scheduler-loop.mjs';
 import { collectTelemetry, TELEMETRY_HINT } from './core/telemetry.mjs';
 import { decideResourcePolicy } from './core/resource-policy.mjs';
+import { loadExecutor, placeholderExecutor, describeExecutor, ExecutorLoadError } from './core/executor-loader.mjs';
 import { planTasks, groupByParent } from './core/planner.mjs';
 import { createCompositeExecutor } from './core/ai-executor.mjs';
 
@@ -148,12 +149,34 @@ async function manageOwner(home, action) {
 async function runDaemon(home) {
   const { store, config } = await openStore(home);
   let daemonTelemetry = {};
+
+  // 中文注释：公开仓不内置任何真实执行器 —— 执行器涉及本机软件路径，属于私有配置。
+  // 中文注释：这里从私有目录装载（默认 <home>/executor/index.mjs，config.execution.module 可覆盖）。
+  // 中文注释：找不到私有执行器就退回占位执行器（如实报 partial）；加载失败则拒绝启动，绝不静默降级。
+  let executor;
+  let executorSource;
+  let executorPath;
+  try {
+    const loaded = await loadExecutor(home, config);
+    executor = loaded.executor ?? placeholderExecutor;
+    executorSource = loaded.source;
+    executorPath = loaded.path;
+  } catch (error) {
+    if (error instanceof ExecutorLoadError) {
+      store.close();
+      print({ started: false, reason: 'executor_load_failed', code: error.code, message: error.message });
+      return;
+    }
+    throw error;
+  }
+
   const loop = createSchedulerLoop({
     store,
     config,
     telemetry: () => daemonTelemetry,
-    // 中文注释：使用复合执行器：ai_call 类型由 AI 执行，desktop/browser 返回 partial。
-    executor: await createCompositeExecutor({ home, config })
+    // 中文注释：使用复合执行器：ai_call 类型由 AI 执行；desktop/browser 类型
+    // 中文注释：优先交给私有执行器（executor-loader 装载），没有就如实报 partial。
+    executor: await createCompositeExecutor({ home, config, delegate: executor })
   });
   const started = loop.start({ keepAlive: true });
   if (!started.started) {
@@ -161,7 +184,13 @@ async function runDaemon(home) {
     print({ ...started, telemetryHint: TELEMETRY_HINT });
     return;
   }
-  print({ ...started, message: '调度循环已启动，Ctrl+C 退出。' });
+  print({
+    ...started,
+    executor: { source: executorSource, path: executorPath },
+    message: executorSource === 'private'
+      ? '调度循环已启动（使用私有执行器），Ctrl+C 退出。'
+      : '调度循环已启动（无私有执行器，任务将如实报 partial），Ctrl+C 退出。'
+  });
   const refresh = setInterval(async () => {
     daemonTelemetry = (await collectTelemetry(home)).reading;
   }, Math.max(2, config.scheduler.pollSeconds) * 1000);
@@ -214,7 +243,7 @@ async function runMcpServer(home, bindingPath = null, bindingSlot = null) {
 // 中文注释：环境自检。把 home、配置来源、WAL、归属账号、调度开关、遥测状态一次性打出来。
 async function runDoctor(home) {
   const telemetry = await collectTelemetry(home);
-  await withStore(home, ({ store, config, configSource }) => {
+  await withStore(home, async ({ store, config, configSource }) => {
     const policy = decideResourcePolicy(telemetry.reading, config.resource);
     print({
       home,
@@ -225,6 +254,7 @@ async function runDoctor(home) {
       migration: store.migration,
       ownerPaired: Boolean(store.getOwner()),
       schedulerEnabled: config.scheduler.enabled,
+      executor: await describeExecutor(home, config),
       tasks: { runnable: store.countRunnableTasks(), open: store.countOpenTasks() },
       telemetry: telemetry.reading,
       telemetrySources: telemetry.sources,

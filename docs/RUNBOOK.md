@@ -350,3 +350,24 @@ npm run runtime -- batch C:\path\to\tasks.txt
 - `unknown` 类型：尝试用 AI 执行（可能能做也可能不能）
 
 ---
+
+---
+
+> 中文注释：以下章节来自 PR #7（私有执行器装载机制，executor-loader）。
+
+## 附二. 私有执行器：公开仓不内置任何真实执行器
+
+执行器涉及本机软件路径，属于私有配置。`npm run runtime -- daemon` 启动时会从私有目录装载执行器。
+
+- 默认位置：`<私有目录>\executor\index.mjs`，模块需导出一个函数（`default` 或命名导出 `executor`）。
+- 覆盖位置：在 `<私有目录>\config\runtime.json` 设 `execution.module`（相对私有目录的路径）。
+- 契约：入参 `{ task, store, config }`，返回 `{ outcome, summary?, reason?, evidence? }`；
+  `outcome` 取 `completed | partial | failed | waiting_for_user`（见 `src/core/scheduler-loop.mjs` 顶部注释）。
+- **失败关闭**：找不到执行器文件 → 退回占位执行器，任务如实判 `partial`；
+  执行器存在但加载失败 / 导出不是函数 / 路径越出私有目录 → daemon 拒绝启动并报结构化错误，
+  绝不静默降级。用 `npm run runtime -- doctor` 的 `executor` 字段确认装载状态。
+
+占位执行器会把任务标成 `partial`，理由写明"未配置执行器：请在私有目录提供 executor，本次不谎报成功"。
+这来自一次真实事故：上一版曾报告"VS Code 已直接打开，进程已确认在运行"，交叉核查发现那台机器上根本没装 VS Code。所以现在的规则是：
+**没有执行证据 → 如实标 `partial`，绝不标 `completed`。**
+

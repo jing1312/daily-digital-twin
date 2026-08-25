@@ -203,3 +203,17 @@ test('snapshotMode 与 managedLoggedInHosts 的非法取值会被配置校验拦
   const good = validateConfig(mergeConfig(DEFAULT_CONFIG, { browser: { managedLoggedInHosts: ['.feishu.cn'] } }));
   assert.deepEqual(good.browser.managedLoggedInHosts, ['.feishu.cn']);
 });
+
+test('execution.module 可选但给了就必须是相对私有目录的非空路径', () => {
+  // 中文注释：不给或给 null 都算"用默认位置"，必须放行。
+  assert.doesNotThrow(() => validateConfig(mergeConfig(DEFAULT_CONFIG, {})));
+  assert.doesNotThrow(() => validateConfig(mergeConfig(DEFAULT_CONFIG, { execution: { module: null } })));
+  assert.doesNotThrow(() => validateConfig(mergeConfig(DEFAULT_CONFIG, { execution: { module: 'executor/index.mjs' } })));
+  for (const bad of ['', '   ', 42, {}, ['executor/index.mjs']]) {
+    assert.throws(
+      () => validateConfig(mergeConfig(DEFAULT_CONFIG, { execution: { module: bad } })),
+      (error) => error.code === 'invalid_config' && error.problems.some((p) => p.includes('execution.module')),
+      `非法 execution.module 必须被拦下：${JSON.stringify(bad)}`
+    );
+  }
+});
