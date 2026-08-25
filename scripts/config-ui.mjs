@@ -223,6 +223,7 @@ export function renderPage(initialConfig, meta) {
   <h1>Daily Twin 私有配置</h1>
   <p class="meta" id="home-meta"></p>
   <div id="home-warning" style="display:none;background:#fff7e0;border:1px solid #e8cf8a;border-radius:9px;padding:10px 14px;font-size:13px;margin-bottom:14px;"></div>
+  <div id="file-problems" style="display:none;background:#fdecec;border:1px solid #f3b6b6;border-radius:9px;padding:10px 14px;font-size:13px;margin-bottom:14px;white-space:pre-wrap;"></div>
 
   <section>
     <h2>AI 规划器（morning 命令的任务分解）</h2>
@@ -302,6 +303,22 @@ export function renderPage(initialConfig, meta) {
     <p class="hint">私有执行器：把模块放到 私有目录\\&lt;这里填的路径&gt;，daemon 启动时自动装载；加载失败会拒绝启动而不是静默降级。</p>
   </section>
 
+  <section>
+    <h2>任务并发与资源档位</h2>
+    <div class="row">
+      <div><label>最大并行槽 maxSlots（1~4）</label><input type="number" id="b-slots"></div>
+      <div><label>未结束任务上限 openTaskLimit（1~4）</label><input type="number" id="b-open"></div>
+      <div><label>数据库忙超时（毫秒）</label><input type="number" id="b-busy"></div>
+    </div>
+    <div class="row">
+      <div><label>最少可用内存 GB</label><input type="number" id="r-min"></div>
+      <div><label>1 槽内存 GB</label><input type="number" id="r-one"></div>
+      <div><label>2 槽内存 GB</label><input type="number" id="r-two"></div>
+      <div><label>4 槽内存 GB</label><input type="number" id="r-four"></div>
+    </div>
+    <p class="hint">内存档位必须满足：最少可用 &le; 1槽 &le; 2槽 &le; 4槽，否则保存时会被拦下。</p>
+  </section>
+
   <button class="primary" onclick="save()">保存配置</button>
   <span class="hint">保存前会做完整校验，非法配置不会被写入。</span>
 </main>
@@ -316,6 +333,11 @@ document.getElementById('home-meta').textContent =
 if (INITIAL.meta.homeWarning) {
   const box = document.getElementById('home-warning');
   box.textContent = '注意：' + INITIAL.meta.homeWarning;
+  box.style.display = 'block';
+}
+if (INITIAL.meta.fileProblems) {
+  const box = document.getElementById('file-problems');
+  box.textContent = '当前配置文件有问题（保存时会强制重新校验）：\\n- ' + INITIAL.meta.fileProblems.join('\\n- ');
   box.style.display = 'block';
 }
 
@@ -337,6 +359,13 @@ function get(id) { return document.getElementById(id).value.trim(); }
   document.getElementById('x-evidence').value = (c.execution && c.execution.requireEvidence === false) ? 'false' : 'true';
   put('x-workermin', c.execution && c.execution.workerMaxMinutes);
   put('x-module', c.execution && c.execution.module);
+  put('b-slots', c.maxSlots);
+  put('b-open', c.openTaskLimit);
+  put('b-busy', c.busyTimeoutMs);
+  put('r-min', c.resource && c.resource.minAvailableMemoryGb);
+  put('r-one', c.resource && c.resource.oneSlotMemoryGb);
+  put('r-two', c.resource && c.resource.twoSlotMemoryGb);
+  put('r-four', c.resource && c.resource.fourSlotMemoryGb);
   put('p-effort', c.planner && c.planner.reasoningEffort);
   put('e-effort', c.executor && c.executor.reasoningEffort);
 })();
@@ -387,6 +416,15 @@ async function loadModels(section) {
 function collectPatch() {
   const moduleValue = get('x-module');
   return {
+    maxSlots: Number(get('b-slots')),
+    openTaskLimit: Number(get('b-open')),
+    busyTimeoutMs: Number(get('b-busy')),
+    resource: {
+      minAvailableMemoryGb: Number(get('r-min')),
+      oneSlotMemoryGb: Number(get('r-one')),
+      twoSlotMemoryGb: Number(get('r-two')),
+      fourSlotMemoryGb: Number(get('r-four'))
+    },
     planner: {
       apiEndpoint: get('p-endpoint'), apiKey: get('p-key'), model: get('p-model'),
       reasoningEffort: get('p-effort') || null
@@ -489,8 +527,19 @@ export function startServer({ home, port = DEFAULT_PORT, host = '127.0.0.1', hom
       const url = new URL(req.url, `http://${req.headers.host}`);
 
       if (req.method === 'GET' && url.pathname === '/') {
-        const { config } = await loadConfig(home);
-        send(res, 200, renderPage(config, { home, configPath, exists: await fileExists(configPath), homeWarning }), 'text/html; charset=utf-8');
+        // 中文注释：现有文件坏了也要能打开页面——否则用户没法在网页里把它修好。
+        // 中文注释：此时用"默认值 + 文件原文（不校验）"渲染表单，并在顶部红条列出问题。
+        let config;
+        let fileProblems = null;
+        try {
+          ({ config } = await loadConfig(home));
+        } catch (error) {
+          if (!(error instanceof ConfigError)) throw error;
+          fileProblems = error.problems;
+          const raw = await readFile(configPath, 'utf8');
+          config = deepMergePatch(structuredClone(DEFAULT_CONFIG), JSON.parse(raw));
+        }
+        send(res, 200, renderPage(config, { home, configPath, exists: await fileExists(configPath), homeWarning, fileProblems }), 'text/html; charset=utf-8');
         return;
       }
 
