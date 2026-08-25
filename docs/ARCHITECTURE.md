@@ -1,309 +1,195 @@
 # Architecture
 
-A personal "digital twin": a long-running agent on a single Windows 11 laptop that accepts
-natural-language tasks from a phone (via Feishu), plans them with a remote model, and executes
-them locally against a real browser session and a whitelist of desktop applications.
+Daily Digital Twin 是一个单用户 Windows 控制平面。它把手机入口、云端任务协调、模型执行和本机能力拆成四个边界，目标不是让模型控制整台电脑，而是让模型只能调用本机预先授权、可验证的高层动作。
 
-This document explains the design constraints, the module boundaries, and — more importantly —
-the failure modes the design is built to prevent. Most decisions here exist because the naive
-version was tried first and broke in a specific, reproducible way.
+## 1. 组件边界
 
----
-
-## 1. Design constraints
-
-The constraints come from the deployment target, not from taste.
-
-| Constraint | Consequence |
-|---|---|
-| One consumer laptop, shared with its owner's daily work | The agent must yield resources, never monopolise them |
-| Runs 24/7, unattended most of the time | Any step that requires a human at the keyboard is a design failure |
-| Handles a signed-in browser session and personal files | Secrets and personal paths must never reach a public repository or a remote model |
-| The public repository is on GitHub; the runtime data is not | Hard separation between code and state, enforced mechanically |
-| Zero third-party runtime dependencies | Only the Node standard library (`node:sqlite`, `node:test`) and PowerShell |
-
-The zero-dependency rule is deliberate: the supply-chain surface of an agent that can drive a
-signed-in browser and launch executables is not a place to accept transitive packages. A CI job
-fails the build if `dependencies` or `devDependencies` becomes non-empty.
-
----
-
-## 2. Trust model
-
-The system splits into three planes with asymmetric trust:
-
-```
-  phone (Feishu)          remote model               local machine
-       │                       │                          │
-       │  task text            │  plan (untrusted)        │
-       └──────────────────────>│─────────────────────────>│
-                               │                          │  review → execute → verify
-                               │<─────────────────────────┘
-                                    redacted receipt only
+```text
+Feishu
+  | task text / control / verification code
+  v
+Daily Twin control plane (local Node 24)
+  |-- deterministic executor --------> Edge / registered Windows apps
+  |-- Multica bridge ----------------> Multica Cloud
+  |                                      | planner issue
+  |                                      | worker issues
+  |                                      v
+  |                                  local Codex workers
+  |                                      |
+  +<---------- stdio Daily Twin MCP <----+
 ```
 
-1. **Control plane (phone).** Sends task text. Identity is bound on first contact
-   (see §5).
-2. **Planning plane (remote model).** Produces plans. **It is never trusted to execute.**
-   It receives only redacted content.
-3. **Execution plane (local).** Reviews the plan against local policy, executes, and — this is
-   the part that matters — *verifies that the action actually happened* before reporting success.
-
-The one-way redaction boundary is enforced in `src/core/redact.mjs` and re-checked at commit time
-by `scripts/privacy-audit.mjs`, which imports the same rule set. Two independent copies of a
-redaction rule set will drift; one shared module cannot.
-
----
-
-## 3. Module map
-
-```
-src/
-  runtime.mjs                 CLI entry point; the only place that touches process I/O
-  core/
-    home.mjs                  Resolves the private state directory. Fails closed.
-    config.mjs                Defaults, validation, and file loading
-    schema.mjs                SQLite schema v2 + forward migration
-    task-store.mjs            Task lifecycle, concurrency slots, resource locks, ledger
-    redact.mjs                Key-name and value-shape redaction
-    telemetry.mjs             CPU / memory / disk / AC-power sampling
-    resource-policy.mjs       Telemetry → how much work is allowed right now
-    scheduler-loop.mjs        The 24/7 loop; dormant by default
-    execution-verifier.mjs    Evidence requirements before a task may be "completed"
-    browser-router.mjs        Which browser profile a web action may use
-    planner.mjs               AI task decomposition (OpenAI-compatible API)
-    ai-executor.mjs           AI executor for ai_call tasks; composite router by task type
-    feishu-adapter.mjs        Message ingress, sender authorisation
-    message-router.mjs        Text → intent (new task / verification code / control command)
-    runtime-command.mjs       Argv → structured command
-    app-catalog.mjs           Whitelisted desktop applications and aliases
-    receipt.mjs               Redacted execution receipts
-    retry-policy.mjs          Bounded backoff
-    token-ledger.mjs          Token accounting per task and worker
-platform/windows/             11 PowerShell scripts: setup, telemetry, backup, repair, self-test
-scripts/                      Privacy audit, PowerShell linter, lexical scanner
-```
-
-Roughly 2,500 lines of application code and 138 tests. The largest module (`task-store.mjs`,
-495 lines) is the one holding all the invariants; everything else is deliberately small enough
-to read in one sitting.
-
----
-
-## 4. State: SQLite, and why the pragmas matter
-
-State lives in a single SQLite database under a private directory outside the repository.
-
-**Schema v2** extends v1 without data loss. `migrate()` derives the starting version as
-`recorded ?? (preexistingTasks ? 1 : 0)`, so a database created before versioning was introduced
-is correctly identified as v1 rather than treated as empty. The whole migration runs inside
-`BEGIN IMMEDIATE` / `COMMIT` with `ROLLBACK` on failure, and is idempotent — reopening the
-database does not re-migrate.
-
-Two pragma settings are not optional:
-
-- **`journal_mode = WAL`.** The original code left the default (`delete`), under which a second
-  writer fails immediately.
-- **`busy_timeout = 5000`.** The original value was `0`, i.e. "fail on the first contended write".
-
-A useful caveat discovered while testing: `busy_timeout` does not save you from a long-held
-`BEGIN IMMEDIATE`. A writer holding an immediate transaction still produces
-`database is locked` after the timeout expires. The design response is *short transactions plus
-a bounded application-level retry* (5 attempts, 120 ms apart), not a longer timeout.
-
-Resource exclusion uses a single atomic statement rather than `SELECT`-then-`INSERT`, plus a
-partial unique index:
-
-```sql
-CREATE UNIQUE INDEX resource_locks_one_per_class
-  ON resource_locks(exclusive_class) WHERE exclusive_class IS NOT NULL;
-```
-
-This is how "at most one foreground desktop-automation task at a time" is enforced — as a database
-constraint, not as an application check that a second worker can race past.
-
----
-
-## 5. Identity: first-pairing binding
-
-The message ingress originally executed anything that arrived in the session. Anyone able to post
-into that conversation could drive the machine.
-
-The fix is deliberately the simplest thing that works for a single-owner deployment:
-**the first sender to arrive becomes the owner**, persisted in `tasks.owner_open_id`; every later
-sender is rejected. There is no account registry, no OAuth flow, no shared secret to store —
-and therefore nothing new to leak. Re-pairing requires local access
-(`runtime owner reset`), which is exactly the intended authority boundary.
-
----
-
-## 6. Resource policy: fail closed, and why that forced a second component
-
-The policy function maps telemetry to `{ slotLimit, acceptsNewActions }`. The original
-implementation returned `acceptsNewActions: true` when given an empty object — it treated
-"I know nothing about this machine" as "go ahead at full capacity".
-
-It now **fails closed**: any missing or non-finite reading yields `slotLimit: 0` and an explicit
-`missing: [...]` list. A subtlety worth noting, because it is the kind of bug that hides for
-months: `Number(null) === 0`, so a naive numeric coercion turns *absent CPU data* into
-*0% CPU load* — the most permissive possible value. Hence `toFiniteNumber()`, which rejects
-`null`, `undefined`, `NaN`, and infinities rather than coercing them.
-
-Failing closed created a new problem. `os.cpus()` returns all-zero time slices in some
-environments (containers, and some virtualised Windows configurations), so CPU load could not be
-sampled at all — which, under a fail-closed policy, means the agent would *never run*. This is
-why `telemetry.mjs` and `platform/windows/Write-DailyTwinTelemetry.ps1` exist: a
-PowerShell sampler writes a timestamped JSON snapshot, and the Node side accepts it only if it is
-under 300 seconds old. Environment variables provide a third, debugging-only path.
-
-Every reading reports **where it came from** (`local_sample` / `env` / `file` / `unavailable`)
-and, when unavailable, a machine-readable reason code. An earlier version reported
-`source: 'file'` even when no value had been obtained, producing the self-contradictory
-diagnostic pair `source=file` alongside `reason=file_missing`. A provenance field that can lie
-is worse than no provenance field.
-
----
-
-## 7. Execution verification: the core lesson
-
-The single most instructive failure in this project's history: the agent reported that VS Code
-had been launched and that its process was "confirmed running". An independent cross-check found
-that VS Code **was not installed on the machine at all** — absent from the registry, `PATH`,
-Start Menu, the target drive, and the process list.
-
-The agent had not lied about the outcome of a check. It had never performed one.
-
-The architectural response is that success is no longer something a component may assert.
-`execution-verifier.mjs` recognises exactly four kinds of evidence — `process`, `window`, `page`,
-`file` — each with structural requirements (a `process` claim needs a positive integer PID and a
-process name; `window`, `page`, and `file` need a target). `finalizeTask()` downgrades any task
-without valid evidence to **`partial`**, never `completed`, with an explicit reason.
-
-The built-in executor is a placeholder that always returns `partial` with the message
-"no executor configured — this run does not falsely claim success". Reporting honest failure is
-the correct default behaviour for an unconfigured system; reporting success is not.
-
-The general principle, and the one worth carrying to other work: **an agent's self-report is
-evidence about the agent, not about the world.** Any claim that something happened outside the
-process must be backed by an observation of the world.
-
----
-
-## 8. Scheduler: dormant by default
-
-`scheduler.enabled` defaults to `false`. `start()` returns
-`{ started: false, reason: 'scheduler_disabled' }` and the operator must opt in explicitly.
-
-For software that can open a browser holding live logins and launch executables on a machine
-someone else is using, the safe default is not "on". A capability that activates on installation
-gives the operator no window in which to verify configuration.
-
-The executor contract is intentionally narrow —
-`{ task, store, config }` → `{ outcome, summary?, reason?, evidence?[] }` — so that the real
-executor can be supplied from the private directory and the public repository never needs to
-contain machine-specific automation.
-
----
-
-## 9. Browser routing
-
-Web work needs a signed-in browser session while nobody is at the computer. Those two
-requirements together eliminate most options, and the elimination was not obvious from the
-tool names.
-
-The finding that resolved weeks of confusion: **the built-in profile named `chrome` is Chrome by
-definition** — it denotes a Chrome *extension* driver, not "a browser". Passing
-`--browser-profile chrome` will never open Edge, and the local auto-detection order
-(Chrome → Brave → Edge → Chromium → Chrome Canary) means Edge is never selected on a machine
-that has Chrome installed.
-
-`browser-router.mjs` encodes five profiles with explicit `driver`, `browser`, `unattended`, and
-`documented` flags, and returns refusals with reason codes
-(`requires_human_at_computer`, `unknown_profile`) plus non-blocking warnings for every known
-risk — including "this profile drives a different browser than you asked for" and
-"this route is not covered by upstream documentation and has not been verified here".
-
-Making the uncertainty a first-class field, rather than a comment, is the point. The full
-analysis, including the two additional causes (tool-profile filtering and plugin gating), is in
-`docs/BROWSER-PROFILES.md`.
-
----
-
-## 10. Cross-language boundary
-
-Node handles state, policy, and orchestration. PowerShell handles everything that requires
-Windows APIs: scheduled tasks, CIM/WMI queries, process and window inspection, drive geometry.
-
-The boundary is **JSON over stdout**, with three rules learned the hard way:
-
-- **No BOM on written files.** A UTF-8 BOM makes `JSON.parse` throw on the first character.
-  The Node reader is nevertheless BOM-tolerant on input, because tolerant readers and strict
-  writers is the combination that survives contact with mixed toolchains.
-- **Atomic writes.** Write to `.tmp`, then `Move-Item` over the target, so a reader never
-  observes a half-written file.
-- **No `Get-Counter`.** Performance-counter path names are localised; on a Chinese-language
-  Windows install, `\Processor(_Total)\% Processor Time` does not resolve. CIM class *property*
-  names are not localised, so `Win32_PerfFormattedData_PerfOS_Processor` is used instead.
-  This class of bug is invisible on an English-locale development machine.
-
-Script files themselves are UTF-8 **with** BOM and CRLF line endings — that is what Windows
-PowerShell 5.1 requires to read non-ASCII source correctly. `.gitattributes` pins the line
-endings so a checkout on another platform cannot silently break them, and CI re-verifies both
-properties after checkout.
-
----
-
-## 11. Verification strategy
-
-Four independent layers, because each catches a class the others cannot:
-
-| Layer | Command | What only this layer catches |
+| 组件 | 负责 | 不负责 |
 |---|---|---|
-| Unit tests (138) | `npm test` | Logic invariants, migration correctness, redaction |
-| Privacy audit | `npm run audit:privacy` | Secrets or personal paths about to be committed |
-| CLI smoke test | `npm run smoke` | End-to-end behaviour, including *absence* of side effects |
-| PowerShell lint + self-test | `npm run lint:ps`, `npm run selftest:ps` | 5.1 syntax, encoding, runtime behaviour of scripts |
+| 飞书 | 手机消息、验证码、控制命令、结果回执 | 本机执行和模型规划 |
+| Daily Twin | 身份、状态、资源、能力票、证据、回执、固定流程 | 通用自然语言推理 |
+| Multica Cloud | issue 看板、planner/worker 编排、运行与 Token 元数据 | 保存本机密钥或直接控制电脑 |
+| Codex worker | 在独立上下文中完成一个结构化子任务 | 任意 Shell、原始浏览器控制、扩大权限 |
+| Playwright MCP | 连接已配对的日常 Edge 并执行浏览器动作 | 选择任务权限或生成最终回执 |
+| PowerShell/.NET | 遥测、计划任务、已登记软件启动和窗口验证 | 猜测软件路径或模型规划 |
 
-Two properties of this suite are worth calling out, because they are what makes it trustworthy
-rather than merely green:
+OpenClaw 不在新主链内。它的配置和状态只在迁移期间保留，用于 48 小时稳定观察期内回滚。
 
-**Negative controls.** Every forbidden-pattern rule carries a `bait` string, and two tests assert
-that (a) each rule fires on its own bait, and (b) no rule fires when the bait appears inside a
-comment or string literal. A detector that has never been observed to fire is not known to work.
+## 2. 两条任务路径
 
-**Guards against false green.** The privacy audit fails if it scanned fewer than 20 files —
-otherwise a broken directory walk would report "pass" while scanning nothing. The PowerShell
-linter fails, rather than skipping, when PSScriptAnalyzer is unavailable — a check that silently
-disappears is worse than no check, because it still reports success.
+### 2.1 固定流程
 
-The lexical scanner (`scripts/lib/powershell-source.mjs`) exists for a related reason: these
-scripts deliberately document bad examples in comments and strings, so pattern rules run against
-a version of the source in which comments and string literals — including here-strings — have
-been replaced by equal-length whitespace, preserving both line numbers and total length.
+已知动作不调用 planner：
 
-CI runs the Node suite on `ubuntu-latest` and the PowerShell suite on `windows-latest`, the latter
-under both `shell: powershell` (Windows PowerShell 5.1, the authoritative 5.1 syntax check) and
-`pwsh` (7.x). A final integration step writes a telemetry file from PowerShell and asserts that
-the Node `doctor` command reads it back with the expected provenance — the cross-language contract
-tested as a contract, not as two independent unit suites.
+- `状态 / 暂停 / 继续 / 取消 / 看证据`
+- `打开 Biomni，输入 X 并运行`
+- `打开 Omicos`
+
+控制命令完全本地处理。Biomni 依次执行 `open -> fill -> 回读复核 -> submit -> wait -> capture`；Omicos 只从私有应用目录读取已核验路径，启动后必须得到进程或窗口证据。
+
+### 2.2 复杂任务
+
+1. 飞书事件先在 SQLite 创建根任务并回复 `DT-YYYYMMDD-NNNN`。
+2. Multica parent issue 只分配给 planner。
+3. planner 结束后，控制平面读取 run messages，提取一个包含 1~4 个子任务的 JSON。
+4. 本机验证每个子任务 ID、标题、指令和 capability，不允许计划扩大权限。
+5. 子任务写入 `task_workers`，再按资源档位分配到固定的 `dt-worker-1..4`。
+6. 每个 worker issue 有独立状态、摘要、失败原因、Multica issue 和本机 capability binding。
+7. 所有 worker 进入终态后，根任务才变为 `completed / partial / failed`。planner 自己的 `done` 绝不等于根任务完成。
+
+planner 和 worker 不同时占重型槽。软件长计算和网页等待交给本机 watcher，不保持模型调用常驻。
+
+## 3. 能力票和 MCP
+
+能力票正文包含：
+
+```text
+version, taskId, multicaIssueId, workerId,
+websites[], apps[], directories[], actions[],
+expiresAt, nonce
+```
+
+正文由本机 HMAC-SHA256 签名。验证顺序是签名、有效期、任务/issue/worker 绑定、动作和资源范围，最后把 nonce 哈希写入 SQLite。nonce 只能消费一次。
+
+每个固定 worker slot 有一个私有 binding 文件：
+
+```text
+data/workers/slots/<worker>/capability.binding.json
+```
+
+MCP 进程启动时读取并消费能力票，随后立即删除 binding。Codex 只看到已经绑定的八个工具：
+
+```text
+browser_open  browser_fill  browser_submit  browser_wait
+browser_capture  app_launch  task_checkpoint  task_checkpoint_read
+```
+
+模型看不到 ticket、HMAC 密钥、`workerId` 参数、原始 Playwright 或通用 Shell。Codex 配置固定为 `sandbox_mode = "workspace-write"` 和 `approval_policy = "never"`，所以越权动作直接失败，不转化成远程审批。
+
+## 4. 浏览器所有权
+
+浏览器进程由 Microsoft Playwright MCP 以这些关键参数连接：
+
+```text
+--browser msedge --extension --caps devtools
+--snapshot-mode none --image-responses omit --output-mode file
+```
+
+默认命令 `playwright-mcp` 会先解析仓库内安装的 `@playwright/mcp/cli.js`，并由当前 Node 进程直接启动；只有显式配置其他命令或已核验路径时才使用该值，因此不依赖系统 PATH 中碰巧存在的同名程序。
+
+没有 Chrome fallback。首次网页动作才惰性连接 Edge，机器人空闲时不会仅为“保持在线”启动浏览器。
+
+新标签页写入 `window.name = DT:<taskId>`，后续每次动作前重新检查标签索引，并要求 marker 与预期值完全相等。标签不存在或 marker 不匹配时停止任务并进入 `waiting_for_user`。填写操作使用登记过的 selector，填写后读取 `inputValue()` 做逐字复核。截图前临时隐藏密码、OTP、通用 verification 输入框以及私有应用目录登记的验证码 selector，截图成功或失败都会在 `finally` 路径恢复原样；只把 `E-<id>` 发到远端，原始路径留在本机证据表。
+
+任务标签映射同时保存在 SQLite 的 `task_browser_sessions`。控制平面重启或标签索引变化后，驱动扫描 Edge 标签并按 `window.name` 恢复原任务页；找不到 marker 时进入 `waiting_for_user`，不会静默新建替代标签。Biomni 固定流程把 `opened / filled / submitted` 检查点写入任务行，验证码或登录恢复后不会重复提交已经完成的副作用。
+
+## 5. 状态和持久化
+
+SQLite 当前 schema 为 v6，主要表包括：
+
+- `tasks`、`task_events`、`daily_task_counters`
+- `task_workers`
+- `resource_locks`、`verification_waits`
+- `task_browser_sessions`
+- `execution_evidence`、`terminal_receipts`
+- `token_ledger`
+- `capability_nonces`
+- `inbound_messages`、`settings`
+
+数据库使用 WAL、`busy_timeout` 和短事务。前台互斥由 `resource_locks.exclusive_class` 的唯一索引保证，不依赖容易竞态的“先查再写”。任务、worker、Multica issue、失败原因、重试计数和检查点都持久化；验证码不持久化。
+
+公开仓不提供私有目录兜底。`DAILY_TWIN_HOME` 缺失时直接失败，配置中的数据库、应用目录、价格表和密钥路径都必须是 home 内的相对路径。
+
+## 6. 资源调度
+
+资源策略是 fail-closed：CPU、供电、内存或磁盘读不到时不接新动作。
+
+| 可用内存 | 槽位 |
+|---|---:|
+| `>= 10 GB` | 4 |
+| `6~10 GB` | 2 |
+| `4~6 GB` | 1 |
+| `< 4 GB` | 0 |
+
+同时要求 CPU 滚动值 `< 55%`、私有目录所在盘至少剩余 20 GB；电池模式最多一个槽。逻辑任务最多四个存活，前台桌面动作始终单线程，网页、软件和文件分别加资源锁。
+
+PowerShell 每分钟通过 CIM 写 `data/telemetry.json`。Node 只接受 300 秒内的样本，并记录读数来源。遥测和控制平面各有独立单实例锁：Node 使用带 PID/nonce 的原子锁文件并接管死 PID 残留，PowerShell 使用 `FileShare.None`，进程退出后由系统释放句柄。
+
+调度器启动时会把上次控制平面中断留下的 `running + deterministic` 任务恢复为 `queued` 并释放旧锁，使其按 SQLite 检查点续跑；`complex` 任务保持原状态，由 Multica 同步桥恢复，不能被本机固定流程调度器误领。
+
+## 7. Token 和上下文
+
+- 固定流程和控制命令优先 0 Token。
+- planner 只存在于拆分阶段，最多输出四个子任务。
+- 每个 worker 有独立 workspace、summary 和 checkpoint 目录。
+- 只有无副作用结果可以缓存；提交、发送、写文件和启动软件的成功状态不能复用。
+- Multica 官方 `issue usage` 返回 issue 聚合量；本机用稳定 issue 快照 ID 原地更新，不把每次轮询重复累加。
+- `token_ledger` 按 task、worker、model 和 usage/run ID 去重记录输入、缓存输入、输出、延迟和费用。
+- 费用只使用私有 `config/pricing.json`；`cached_tokens` 是输入 Token 的子集，先从输入量扣除，再分别套用普通输入和缓存输入费率，不能重复计费。未知价格返回 `null`。
+- worker 的检查点按 `task + worker` 隔离，`task_checkpoint_read` 只能读取当前绑定 worker 的内容。
+- 90 分钟预算从当前 worker run 真正开始时计算，轮询不会刷新起点。到期时只有本轮开始后保存的新检查点才有效；控制平面会重签能力票、取消当前 Multica run 并对同一 issue 执行 rerun。没有新检查点或续跑链路不完整时停止远端 run 并把 worker 标为失败，不伪造续跑。
+
+## 8. 远端生命周期
+
+复杂任务的本机状态和 Multica run 必须一起变化：
+
+- `暂停`：本机先标记暂停，再用 `multica issue cancel-task <run-id>` 停止 planner 或 worker 的活动 run，并记住对应 issue。
+- 暂停期间：后台同步继续检查，补取消命令时尚未出现的远端 run，防止任务仍在消耗 Token。
+- `继续`：仅对暂停时成功停止的 issue 执行 `multica issue rerun <issue-id>`；任何 rerun 失败都会让任务保持暂停并明确回复。
+- `取消`：停止所有可见活动 run 后进入本机终态；远端停止失败会在回复中如实列出，不会伪报全部成功。
+
+worker issue 派发失败会从 `dispatching` 回到 `planned` 并在后续轮次重试。planner 输出无效会直接使根任务失败并进入终态回执队列，不会卡在运行态。根任务终态之后才出现的 planner/worker run 也会被后台补取消；确认所有远端 issue 已进入终态后记录一次清理完成，不再每 15 秒重复调用。
+
+人工登录、验证码和需要人工判断的弹窗属于 `waiting_for_user`，不增加瞬时错误重试计数。只有可重试的执行错误才使用三次退避额度。
+
+## 9. 进程生命周期
+
+`Install-DailyTwinServices.ps1` 为当前用户注册三个登录触发任务：
+
+```text
+DailyDigitalTwin-ControlPlane
+DailyDigitalTwin-Telemetry
+DailyDigitalTwin-Multica
+```
+
+任务使用 PowerShell 7、`Interactive`、`Limited`、无限执行时长、崩溃后重试和 `IgnoreNew`。注册动作显式携带私有目录、Node 和 Multica 可执行文件路径，不依赖注销后才刷新的环境变量。`-WhatIf` 只生成预览，不调用计划任务 API；真实注册的所有 cmdlet 都以错误即停止。`-SkipMultica` 只注册前两个，并在回执中只列出实际注册项。
+
+控制平面启动飞书 WebSocket、固定流程调度器、Multica 同步、Token/回执泵和健康心跳。启动任一步失败都会立即走同一清理入口，关闭已经打开的飞书、浏览器、SQLite 和进程锁，不能留下“进程仍在但服务不可用”的假在线状态。每个后台泵单飞，同类上一次调用未结束时不会重入；停止时先停 timer、scheduler 和飞书，再等待活动泵结束，最后关闭浏览器、健康记录、SQLite 和进程锁。终态文字回执在发送前统一脱敏。
+
+旧 OpenClaw 任务只有在 `control-plane-health.json` 显示同一实例连续健康至少 48 小时、状态仍为 `running`、PID 真实存活且心跳新鲜时，才允许由 `Complete-DailyTwinCutover.ps1` 停用。刚停止进程写下的新鲜心跳不能通过闸门。回滚脚本注销新任务并恢复旧任务，不删除任何数据。
+
+## 10. 仍需真实环境证明的部分
+
+自动化测试不能证明以下外部契约：
+
+- Multica CLI 已安装、登录，planner 和四个 Codex agent 配置正确。
+- Multica 当前版本会给每项工作创建独立 `CODEX_HOME`，并加载对应 MCP 配置。
+- Playwright Extension 已在日常 Edge 中配对，登录态在 Edge 重启后仍可用。
+- 飞书事件订阅、WebSocket、allowlist 和图片上传在真实租户可用。
+- Omicos、Biomni 的真实路径、selector、窗口标题和完成条件仍匹配当前版本。
+- Windows 登录后三个计划任务能持续在线，并在所有 PowerShell 窗口关闭后继续工作。
+- 空闲 5 分钟时控制平面、MCP 和 Multica daemon 的总内存低于目标值。
+
+这些项目必须按 [RUNBOOK](RUNBOOK.md) 真机验收。CI 通过只说明源码内部契约成立，不能替代上述事实。
 
 ---
 
-## 12. What is not verified here
-
-Stated explicitly, because an architecture document that omits its own limits is marketing:
-
-- The PowerShell scripts' **runtime** behaviour on real Windows: scheduled-task registration,
-  CIM queries, window inspection. Development happened in a Linux container; only syntax,
-  encoding, static analysis, and the platform-independent subset of the self-test run there.
-- The **Windows PowerShell 5.1 syntax boundary**. The development environment has only
-  PowerShell 7.6.4, where several 7-only constructs parse without complaint. That judgement is
-  delegated to the `windows-latest` CI job.
-- Whether **Edge** can load the same unpacked extension as Chrome. Marked
-  `documented: false` in code, warned on at every routing decision, and listed as the one
-  genuinely open question in `docs/BROWSER-PROFILES.md`.
-
----
+> 中文注释：以下章节来自 main 侧 v3（AI planner / executor 与 morning 工作流在合并后的代码中仍然可用）。
 
 ## 13. Morning workflow and AI integration (v3)
 
@@ -353,13 +239,3 @@ executor wired into `runtime daemon`.
 Adds `parent_task_id`, `task_type`, and `priority` columns to the `tasks` table. Migration is
 idempotent and backward-compatible: a v2 database upgrades in place, existing tasks get
 `task_type = 'unknown'` and `priority = 0`.
-
-## 14. Deferred work
-
-The full token and context plane — a context compiler, prompt-cache classes with explicit
-stability tiers, and per-worker context namespaces for isolation — is **deferred to a following
-round**. This round establishes only the ledger (`token_ledger`, including a `cached_tokens`
-column) so that cost and cache-hit data start accumulating before the optimisation work begins.
-
-Optimising context assembly without a baseline measurement would be guesswork; the ledger is
-the measurement.

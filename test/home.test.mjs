@@ -37,8 +37,11 @@ test('数据库路径始终落在 home 之下，并接受 Windows 反斜杠写�
   assert.equal(databasePath(home, 'data\\runtime.sqlite'), resolve(home, 'data/runtime.sqlite'));
 });
 
-test('私有目录清单覆盖任务数据、截图、缓存与日志', () => {
-  for (const expected of ['data/tasks', 'data/receipts', 'data/screenshots', 'data/cache', 'data/logs', 'config']) {
+test('私有目录清单覆盖任务数据、截图、缓存、worker、锁与日志', () => {
+  for (const expected of [
+    'data/tasks', 'data/receipts', 'data/screenshots', 'data/cache', 'data/logs',
+    'data/workers', 'data/locks', 'config'
+  ]) {
     assert.ok(HOME_DIRECTORIES.includes(expected), `缺少目录 ${expected}`);
   }
 });

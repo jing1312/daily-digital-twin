@@ -146,6 +146,26 @@ try {
     Write-DailyTwinCheck -Name '参数覆盖环境变量' -Condition ((Resolve-DailyTwinHome -PrivateHome $homeA) -eq $homeA)
     $env:DAILY_TWIN_HOME = ''
 
+    Write-Output '--- Enter-DailyTwinProcessLock ---'
+    $lockCommand = Get-Command -Name 'Enter-DailyTwinProcessLock' -CommandType Function -ErrorAction SilentlyContinue
+    Write-DailyTwinCheck -Name '公共库提供单实例文件锁' -Condition ($null -ne $lockCommand)
+    if ($null -ne $lockCommand) {
+        $lockHome = Join-Path $workRoot 'lock-home'
+        $firstLock = Enter-DailyTwinProcessLock -HomeDirectory $lockHome -Name 'telemetry'
+        $secondBlocked = $false
+        try {
+            $secondLock = Enter-DailyTwinProcessLock -HomeDirectory $lockHome -Name 'telemetry'
+            $secondLock.Dispose()
+        } catch {
+            $secondBlocked = $true
+        }
+        Write-DailyTwinCheck -Name '同名第二实例被拒绝' -Condition $secondBlocked
+        $firstLock.Dispose()
+        $thirdLock = Enter-DailyTwinProcessLock -HomeDirectory $lockHome -Name 'telemetry'
+        Write-DailyTwinCheck -Name '释放后可以重新取得锁' -Condition ($null -ne $thirdLock)
+        $thirdLock.Dispose()
+    }
+
     Write-Output '--- Get-DailyTwinFreeSpaceGb（拿不到时必须是 null，不能是 0）---'
     $freeSpace = Get-DailyTwinFreeSpaceGb -Path $workRoot
     if ($onWindows) {
@@ -157,6 +177,13 @@ try {
     $emptyPathSurvived = $true
     try { $null = Get-DailyTwinFreeSpaceGb -Path '' } catch { $emptyPathSurvived = $false }
     Write-DailyTwinCheck -Name '空路径不抛异常（遥测脚本会传空的 SystemDrive）' -Condition $emptyPathSurvived
+    $uncFreeSpace = Get-DailyTwinFreeSpaceGb -Path '\\server\share\folder'
+    Write-DailyTwinCheck -Name 'UNC 路径返回 null（不把网络路径当本地卷）' -Condition ($null -eq $uncFreeSpace) -Detail "得到：$uncFreeSpace"
+    $invalidFreeSpace = Get-DailyTwinFreeSpaceGb -Path '::invalid::'
+    Write-DailyTwinCheck -Name '无效路径返回 null' -Condition ($null -eq $invalidFreeSpace) -Detail "得到：$invalidFreeSpace"
+    Write-DailyTwinCheck -Name '负数可用空间返回 null' -Condition ($null -eq (ConvertTo-DailyTwinFreeSpaceGb -AvailableBytes -1 -TotalBytes 100))
+    Write-DailyTwinCheck -Name '超过卷总容量返回 null' -Condition ($null -eq (ConvertTo-DailyTwinFreeSpaceGb -AvailableBytes 101 -TotalBytes 100))
+    Write-DailyTwinCheck -Name '合法容量按 GB 返回' -Condition ((ConvertTo-DailyTwinFreeSpaceGb -AvailableBytes 5GB -TotalBytes 10GB) -eq 5)
 
     Write-Output '--- Resolve-DailyTwinPwsh ---'
     Write-DailyTwinCheck -Name '不存在的可执行文件返回 null' -Condition ($null -eq (Resolve-DailyTwinPwsh -Preferred 'definitely-not-a-real-exe'))
@@ -237,6 +264,33 @@ try {
         Write-DailyTwinCheck -Name '能在 PATH 上找到 pwsh' -Condition ($true) -Detail $foundPwsh
     } else {
         Write-DailyTwinSkip -Name '能在 PATH 上找到 pwsh' -Reason '本机没装 PowerShell 7，属于环境问题而非脚本缺陷'
+    }
+
+    Write-Output '--- Test-DailyTwinCutoverHealth ---'
+    $cutoverCommand = Get-Command -Name 'Test-DailyTwinCutoverHealth' -CommandType Function -ErrorAction SilentlyContinue
+    Write-DailyTwinCheck -Name '公共库提供 48 小时切换健康闸门' -Condition ($null -ne $cutoverCommand)
+    if ($null -ne $cutoverCommand) {
+        $cutoverNow = [DateTime]::Parse('2026-07-30T12:00:00Z').ToUniversalTime()
+        $healthy = [pscustomobject]@{
+            status = 'running'
+            pid = 4242
+            startedAt = '2026-07-28T11:00:00Z'
+            lastHeartbeatAt = '2026-07-30T11:59:00Z'
+        }
+        $alive = { param($candidatePid) $candidatePid -eq 4242 }
+        Write-DailyTwinCheck -Name '状态运行、PID 存活且超过 48 小时才允许切换' `
+            -Condition (Test-DailyTwinCutoverHealth -Health $healthy -Now $cutoverNow -IsProcessAlive $alive)
+
+        $stopped = [pscustomobject]@{
+            status = 'stopped'
+            pid = 4242
+            startedAt = $healthy.startedAt
+            lastHeartbeatAt = $healthy.lastHeartbeatAt
+        }
+        Write-DailyTwinCheck -Name '刚停止产生的新鲜心跳也不能通过切换闸门' `
+            -Condition (-not (Test-DailyTwinCutoverHealth -Health $stopped -Now $cutoverNow -IsProcessAlive $alive))
+        Write-DailyTwinCheck -Name 'PID 不存活时不能通过切换闸门' `
+            -Condition (-not (Test-DailyTwinCutoverHealth -Health $healthy -Now $cutoverNow -IsProcessAlive { $false }))
     }
 
     Write-Output '--- 应用目录别名匹配（B8 / B8b，VS Code 幻觉事件的直接教训）---'
