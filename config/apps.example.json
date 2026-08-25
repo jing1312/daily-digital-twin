@@ -23,7 +23,20 @@
       "aliases": ["Biomni"],
       "url": "https://example.invalid/biomni",
       "browser": "edge",
-      "resource": "web:biomni"
+      "resource": "web:biomni",
+      "fields": {
+        "prompt": "textarea"
+      },
+      "actions": {
+        "run": "button[type=\"submit\"]"
+      },
+      "verification": {
+        "field": "input[autocomplete=\"one-time-code\"]",
+        "submit": "button[type=\"submit\"]"
+      },
+      "loginRequiredSelector": "form[action*=\"login\"]",
+      "resultCondition": "任务完成",
+      "resultTimeoutMs": 900000
     }
   ]
 }

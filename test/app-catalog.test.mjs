@@ -96,5 +96,12 @@ test('文件缺失或 JSON 非法时报出文件路径便于排错', async () =>
 test('仓库内的示例应用目录本身是合法的', async () => {
   const catalog = await loadAppCatalog('config/apps.example.json');
   assert.equal(resolveApp(catalog, 'vs code').id, 'vscode');
-  assert.equal(resolveWebsite(catalog, 'biomni').id, 'biomni');
+  const biomni = resolveWebsite(catalog, 'biomni');
+  assert.equal(biomni.id, 'biomni');
+  assert.equal(typeof biomni.fields?.prompt, 'string');
+  assert.equal(typeof biomni.actions?.run, 'string');
+  assert.equal(typeof biomni.verification?.field, 'string');
+  assert.equal(typeof biomni.loginRequiredSelector, 'string');
+  assert.equal(typeof biomni.resultCondition, 'string');
+  assert.ok(Number(biomni.resultTimeoutMs) > 0);
 });

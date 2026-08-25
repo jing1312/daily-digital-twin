@@ -1,7 +1,7 @@
 ﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-    一次跑完本机体检：Node、私有目录、数据库、遥测、磁盘、OpenClaw 网关、浏览器 profile。
+    一次跑完本机体检：Node、私有目录、数据库、遥测、控制平面、Multica 和 Edge。
 
 .DESCRIPTION
     出问题时先跑这个。它只读不写（除了可选的遥测采样），
@@ -16,7 +16,6 @@
 param(
     [string]$PrivateHome,
     [string]$RepositoryRoot,
-    [int]$GatewayPort = 18789,
     [switch]$RefreshTelemetry
 )
 
@@ -94,7 +93,7 @@ if ($null -eq $systemFreeGb) {
     Add-Check -Name 'disk-system' -State 'warn' -Detail '读不到系统盘剩余空间。'
 } elseif ($systemFreeGb -lt 20) {
     Add-Check -Name 'disk-system' -State 'warn' -Detail "系统盘 $env:SystemDrive 仅剩 $systemFreeGb GB。" `
-        -Fix "OpenClaw 的临时日志在 $env:SystemDrive\WINDOWS\TEMP\openclaw，可以定期清理或改到 D 盘。"
+        -Fix '清理系统盘，并确认 DAILY_TWIN_HOME、截图和日志都在空间充足的数据盘。'
 } else {
     Add-Check -Name 'disk-system' -State 'ok' -Detail "系统盘剩余 $systemFreeGb GB"
 }
@@ -155,20 +154,83 @@ if ($resolvedHome) {
     }
 }
 
-# ---- OpenClaw 网关 ----
-$listening = @()
-try { $listening = @(Get-NetTCPConnection -LocalPort $GatewayPort -State Listen -ErrorAction Stop) } catch { $listening = @() }
-if ($listening.Count -gt 0) {
-    Add-Check -Name 'gateway' -State 'ok' -Detail "端口 $GatewayPort 正在监听。"
-} else {
-    Add-Check -Name 'gateway' -State 'warn' -Detail "端口 $GatewayPort 没有监听者，WebSocket 会以 1006 断开。" `
-        -Fix ".\Repair-OpenClawGatewayTask.ps1  然后按提示加 -Apply"
+# ---- 新控制平面健康与计划任务 ----
+if ($resolvedHome) {
+    $healthPath = Join-Path $resolvedHome 'data\control-plane-health.json'
+    if (-not (Test-Path -LiteralPath $healthPath -PathType Leaf)) {
+        Add-Check -Name 'control-plane' -State 'fail' -Detail '没有控制平面健康文件，飞书新网关尚未成功启动。' `
+            -Fix '.\Install-DailyTwinServices.ps1 -WhatIf，确认后去掉 -WhatIf，再启动 DailyDigitalTwin-ControlPlane。'
+    } else {
+        try {
+            $health = ConvertFrom-DailyTwinJson -Path $healthPath
+            $healthStatus = Get-DailyTwinProperty -InputObject $health -Name 'status'
+            $healthPid = Get-DailyTwinProperty -InputObject $health -Name 'pid'
+            $heartbeatText = Get-DailyTwinProperty -InputObject $health -Name 'lastHeartbeatAt'
+            $heartbeatAgeMinutes = $null
+            if ($heartbeatText) {
+                $heartbeatAgeMinutes = ([DateTime]::UtcNow - [DateTime]::Parse($heartbeatText).ToUniversalTime()).TotalMinutes
+            }
+            $processAlive = $false
+            if ($null -ne $healthPid) {
+                $processAlive = $null -ne (Get-Process -Id ([int]$healthPid) -ErrorAction SilentlyContinue)
+            }
+            if ($healthStatus -eq 'running' -and $processAlive -and $null -ne $heartbeatAgeMinutes -and $heartbeatAgeMinutes -le 5) {
+                Add-Check -Name 'control-plane' -State 'ok' -Detail "PID $healthPid，心跳 $([math]::Round($heartbeatAgeMinutes, 2)) 分钟前。"
+            } else {
+                Add-Check -Name 'control-plane' -State 'fail' `
+                    -Detail "健康状态=$healthStatus，PID=$healthPid，进程存活=$processAlive，心跳年龄=$heartbeatAgeMinutes 分钟。" `
+                    -Fix '查看 DailyDigitalTwin-ControlPlane 计划任务的 LastTaskResult 和控制平面日志。'
+            }
+        } catch {
+            Add-Check -Name 'control-plane' -State 'fail' -Detail "健康文件无效：$($_.Exception.Message)"
+        }
+    }
 }
 
-# ---- 浏览器 profile 提醒 ----
-Add-Check -Name 'browser-profile' -State 'info' `
-    -Detail 'OpenClaw 内置的 chrome profile 是 Chrome 扩展，不是 Edge。本地探测顺序 Chrome→Brave→Edge→Chromium→Canary。' `
-    -Fix '要用哪条路线见 docs/BROWSER-PROFILES.md；默认走 openclaw 托管 profile。'
+foreach ($taskName in @('DailyDigitalTwin-ControlPlane', 'DailyDigitalTwin-Telemetry')) {
+    $scheduledTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    if ($scheduledTask) {
+        Add-Check -Name "task-$taskName" -State 'ok' -Detail "状态 $($scheduledTask.State)"
+    } else {
+        Add-Check -Name "task-$taskName" -State 'fail' -Detail '计划任务不存在。' `
+            -Fix '.\Install-DailyTwinServices.ps1 -WhatIf，确认后去掉 -WhatIf。'
+    }
+}
+
+# ---- Multica ----
+$multicaPreferred = $env:DAILY_TWIN_MULTICA
+if ([string]::IsNullOrWhiteSpace($multicaPreferred)) { $multicaPreferred = 'multica.exe' }
+$multicaPath = Resolve-DailyTwinExecutable -Preferred $multicaPreferred -AllowedNames @('multica', 'multica.exe')
+if ($multicaPath) {
+    Add-Check -Name 'multica' -State 'ok' -Detail $multicaPath
+} else {
+    Add-Check -Name 'multica' -State 'fail' -Detail '找不到 Multica CLI，复杂任务无法派发。' `
+        -Fix '安装并登录 Multica CLI；若只测试固定流程，安装服务时显式使用 -SkipMultica。'
+}
+
+# ---- Edge / Playwright Extension 配置 ----
+if ($resolvedHome) {
+    $runtimeConfigPath = Join-Path $resolvedHome 'config\runtime.json'
+    if (Test-Path -LiteralPath $runtimeConfigPath -PathType Leaf) {
+        try {
+            $runtimeConfig = ConvertFrom-DailyTwinJson -Path $runtimeConfigPath
+            $browserConfig = Get-DailyTwinProperty -InputObject $runtimeConfig -Name 'browser'
+            $defaultBrowser = Get-DailyTwinProperty -InputObject $browserConfig -Name 'defaultBrowser'
+            $extensionEnabled = Get-DailyTwinProperty -InputObject $browserConfig -Name 'extension' -Default $false
+            if ($defaultBrowser -eq 'msedge' -and $extensionEnabled -eq $true) {
+                Add-Check -Name 'edge' -State 'info' `
+                    -Detail '配置要求 msedge + Playwright Extension；静态配置正确，仍需在真实 Edge 中完成配对测试。'
+            } else {
+                Add-Check -Name 'edge' -State 'fail' -Detail "defaultBrowser=$defaultBrowser，extension=$extensionEnabled。" `
+                    -Fix '把私有 runtime.json 设置为 browser.defaultBrowser=msedge、browser.extension=true。'
+            }
+        } catch {
+            Add-Check -Name 'edge' -State 'fail' -Detail "读取浏览器配置失败：$($_.Exception.Message)"
+        }
+    } else {
+        Add-Check -Name 'edge' -State 'fail' -Detail '缺少私有 config\runtime.json。'
+    }
+}
 
 # ---- 输出 ----
 $symbols = @{ ok = '[ok]  '; warn = '[warn]'; fail = '[FAIL]'; info = '[info]' }

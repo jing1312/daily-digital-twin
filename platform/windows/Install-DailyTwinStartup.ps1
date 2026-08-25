@@ -20,6 +20,7 @@ param(
     [string]$RuntimeScript,
 
     [string]$TaskName = 'DailyDigitalTwin',
+    [string[]]$RuntimeArguments = @(),
 
     # 中文注释：崩溃后重启次数。0 表示不重启。
     [int]$RestartCount = 3,
@@ -54,12 +55,14 @@ if (-not $pwshPath) {
 }
 
 $resolvedScript = (Resolve-Path -LiteralPath $RuntimeScript).Path
-$action = New-ScheduledTaskAction -Execute $pwshPath `
-    -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$resolvedScript`""
-
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
-
-# 中文注释：ExecutionTimeLimit 设为 TimeSpan::Zero 即"不限制运行时长"，这是 7x24 常驻任务的必要条件。
+$actionArgumentParts = @('-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', $resolvedScript)
+foreach ($runtimeArgument in $RuntimeArguments) {
+    if ($null -eq $runtimeArgument -or $runtimeArgument.Contains('"')) {
+        throw '计划任务参数不能为空或包含双引号。'
+    }
+    $actionArgumentParts += $runtimeArgument
+}
+$quotedActionArguments = @($actionArgumentParts | ForEach-Object { '"' + $_ + '"' })
 $settingsParameters = @{
     StartWhenAvailable        = $true
     AllowStartIfOnBatteries   = $true
@@ -71,20 +74,23 @@ if ($RestartCount -gt 0) {
     $settingsParameters['RestartCount'] = $RestartCount
     $settingsParameters['RestartInterval'] = (New-TimeSpan -Minutes $RestartIntervalMinutes)
 }
-$settings = New-ScheduledTaskSettingsSet @settingsParameters
 
-# 中文注释：LogonType 的合法取值是 None / Password / S4U / Interactive / Group / ServiceAccount /
-# 中文注释：InteractiveOrPassword。写 InteractiveToken 会直接报参数校验失败 —— 这是本机踩过的坑。
-$principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" `
-    -LogonType Interactive -RunLevel Limited
-
-if ($PSCmdlet.ShouldProcess($TaskName, '注册开机启动任务')) {
-    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
-        -Settings $settings -Principal $principal -Force | Out-Null
+if ($WhatIfPreference) {
+    $null = $PSCmdlet.ShouldProcess($TaskName, '注册开机启动任务')
+} else {
+    $action = New-ScheduledTaskAction -Execute $pwshPath -Argument ($quotedActionArguments -join ' ') -ErrorAction Stop
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME" -ErrorAction Stop
+    # 中文注释：ExecutionTimeLimit 设为 TimeSpan::Zero 即"不限制运行时长"，这是 7x24 常驻任务的必要条件。
+    $settings = New-ScheduledTaskSettingsSet @settingsParameters -ErrorAction Stop
+    # 中文注释：LogonType 必须使用合法的 Interactive，不能写 InteractiveToken。
+    $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited -ErrorAction Stop
+    if ($PSCmdlet.ShouldProcess($TaskName, '注册开机启动任务')) {
+        Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force -ErrorAction Stop | Out-Null
+    }
 }
 
 Write-DailyTwinResult -InputObject ([pscustomobject]@{
-    status             = 'registered'
+    status             = if ($WhatIfPreference) { 'preview' } else { 'registered' }
     taskName           = $TaskName
     executable         = $pwshPath
     script             = $resolvedScript

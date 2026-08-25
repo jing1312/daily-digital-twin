@@ -15,5 +15,11 @@
     "runtime": "node --disable-warning=ExperimentalWarning src/runtime.mjs",
     "doctor": "node --disable-warning=ExperimentalWarning src/runtime.mjs doctor",
     "check": "npm test && npm run audit:privacy && npm run smoke"
+  },
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "1.71.1",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "@playwright/mcp": "0.0.78",
+    "zod": "4.4.3"
   }
 }

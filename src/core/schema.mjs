@@ -1,6 +1,6 @@
 // 中文注释：集中管理 SQLite 连接参数与版本化迁移，避免每个调用方各写一套建表语句。
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 7;
 
 // 中文注释：v1 基础表，保持与首个版本完全一致，便于旧库原地升级。
 const BASE_TABLES = `
@@ -64,25 +64,93 @@ const V2_TABLES = `
   );
 `;
 
+const V3_TABLES = `
+  CREATE TABLE IF NOT EXISTS daily_task_counters (
+    date_key TEXT PRIMARY KEY,
+    next_value INTEGER NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS capability_nonces (
+    nonce_hash TEXT PRIMARY KEY,
+    task_public_id TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    consumed_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS terminal_receipts (
+    task_id INTEGER PRIMARY KEY,
+    state TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    evidence_refs TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    sending_claimed_at TEXT,
+    sent_at TEXT
+  );
+`;
+
+const V4_TABLES = `
+  CREATE TABLE IF NOT EXISTS inbound_messages (
+    message_id TEXT PRIMARY KEY,
+    sender_open_id TEXT NOT NULL,
+    chat_id TEXT NOT NULL,
+    task_id INTEGER,
+    received_at TEXT NOT NULL
+  );
+`;
+
+const V5_TABLES = `
+  CREATE TABLE IF NOT EXISTS task_workers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id INTEGER NOT NULL,
+    subtask_id TEXT NOT NULL,
+    worker_id TEXT,
+    multica_issue_id TEXT,
+    state TEXT NOT NULL DEFAULT 'planned',
+    title TEXT NOT NULL,
+    instructions TEXT NOT NULL,
+    capabilities TEXT NOT NULL DEFAULT '{}',
+    binding_path TEXT,
+    summary TEXT,
+    failure_reason TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(task_id, subtask_id),
+    UNIQUE(multica_issue_id)
+  );
+`;
+
+const V6_TABLES = `
+  CREATE TABLE IF NOT EXISTS task_browser_sessions (
+    task_id INTEGER PRIMARY KEY,
+    website_id TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    marker TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+`;
+
 // 中文注释：v1 -> v2 需要补的列，按表分组，逐列判断是否已存在。
+// 中文注释：v7 合并说明：并入 main 侧 v3 的父子任务三列（parent_task_id / task_type / priority）。
 const ADDED_COLUMNS = {
   tasks: [
     ['paused_from', 'TEXT'],
     ['attempt', 'INTEGER NOT NULL DEFAULT 0'],
     ['failure_reason', 'TEXT'],
     ['resume_state', 'TEXT'],
-    ['owner_open_id', 'TEXT']
-  ],
-  resource_locks: [['exclusive_class', 'TEXT']],
-  token_ledger: [['cached_tokens', 'INTEGER NOT NULL DEFAULT 0']]
-};
-
-// 中文注释：v2 -> v3 新增列：parent_task_id 建立父子任务关系，task_type 区分任务类型（ai_call/desktop/browser/unknown）。
-const V3_ADDED_COLUMNS = {
-  tasks: [
+    ['owner_open_id', 'TEXT'],
+    ['public_id', 'TEXT'],
+    ['multica_issue_id', 'TEXT'],
+    ['task_kind', "TEXT NOT NULL DEFAULT 'general'"],
+    ['reply_chat_id', 'TEXT'],
+    ['source_message_id', 'TEXT'],
+    ['retry_after', 'TEXT'],
     ['parent_task_id', 'INTEGER'],
     ['task_type', "TEXT NOT NULL DEFAULT 'unknown'"],
     ['priority', 'INTEGER NOT NULL DEFAULT 0']
+  ],
+  resource_locks: [['exclusive_class', 'TEXT']],
+  token_ledger: [
+    ['cached_tokens', 'INTEGER NOT NULL DEFAULT 0'],
+    ['external_usage_id', 'TEXT']
   ]
 };
 
@@ -96,13 +164,31 @@ const V2_INDEXES = `
   CREATE INDEX IF NOT EXISTS tasks_state ON tasks (state, paused);
 `;
 
-// 中文注释：v3 新增索引：按父任务查子任务、按类型筛选。
 const V3_INDEXES = `
+  CREATE UNIQUE INDEX IF NOT EXISTS tasks_public_id ON tasks (public_id) WHERE public_id IS NOT NULL;
+  CREATE UNIQUE INDEX IF NOT EXISTS tasks_multica_issue_id
+    ON tasks (multica_issue_id) WHERE multica_issue_id IS NOT NULL;
+  CREATE INDEX IF NOT EXISTS capability_nonces_expiry ON capability_nonces (expires_at);
+`;
+
+const V4_INDEXES = `
+  CREATE UNIQUE INDEX IF NOT EXISTS token_ledger_external_usage
+    ON token_ledger (task_id, external_usage_id) WHERE external_usage_id IS NOT NULL;
+  CREATE INDEX IF NOT EXISTS inbound_messages_task ON inbound_messages (task_id);
+`;
+
+const V5_INDEXES = `
+  CREATE INDEX IF NOT EXISTS task_workers_task ON task_workers (task_id, id);
+  CREATE INDEX IF NOT EXISTS task_workers_state ON task_workers (state, worker_id);
+`;
+
+// 中文注释：v7 新增索引：按父任务查子任务、按类型筛选（并入 main 侧 v3 的索引）。
+const V6_INDEXES = `
   CREATE INDEX IF NOT EXISTS tasks_parent ON tasks (parent_task_id);
   CREATE INDEX IF NOT EXISTS tasks_type ON tasks (task_type);
 `;
 
-const KNOWN_TABLES = new Set([...Object.keys(ADDED_COLUMNS), ...Object.keys(V3_ADDED_COLUMNS)]);
+const KNOWN_TABLES = new Set(Object.keys(ADDED_COLUMNS));
 
 // 中文注释：判断表是否已存在，用来区分"全新库"和"待升级的旧库"。
 export function tableExists(db, name) {
@@ -158,6 +244,53 @@ function writeSchemaVersion(db, version) {
   `).run(String(version));
 }
 
+function dateKeyFromIso(value) {
+  const compact = String(value ?? '').slice(0, 10).replaceAll('-', '');
+  return /^\d{8}$/.test(compact) ? compact : '00000000';
+}
+
+// 中文注释：从 tasks.public_id 里量出每个日期已经用掉的最大序号。
+//           回填和计数器同步都以实际表状态为准，这样不管库是怎么走到当前状态的，
+//           "下一个序号还没被占用"这个不变量都成立。
+//           序号写成 \d{4,} 而不是 \d{4}：满 4 位之后会自然进到 5 位，不能只认 4 位。
+function readUsedTaskSequences(db) {
+  const used = new Map();
+  for (const row of db.prepare(`SELECT public_id FROM tasks WHERE public_id IS NOT NULL`).all()) {
+    const matched = /^DT-(\d{8})-(\d{4,})$/.exec(String(row.public_id ?? ''));
+    if (!matched) continue;
+    const sequence = Number.parseInt(matched[2], 10);
+    if (!Number.isSafeInteger(sequence)) continue;
+    if (sequence > (used.get(matched[1]) ?? 0)) used.set(matched[1], sequence);
+  }
+  return used;
+}
+
+function backfillPublicTaskIds(db) {
+  const rows = db.prepare(`SELECT id, created_at FROM tasks WHERE public_id IS NULL ORDER BY id ASC`).all();
+  const counters = readUsedTaskSequences(db);
+  const update = db.prepare(`UPDATE tasks SET public_id = ? WHERE id = ? AND public_id IS NULL`);
+  for (const row of rows) {
+    const dateKey = dateKeyFromIso(row.created_at);
+    const sequence = (counters.get(dateKey) ?? 0) + 1;
+    counters.set(dateKey, sequence);
+    update.run(`DT-${dateKey}-${String(sequence).padStart(4, '0')}`, row.id);
+  }
+
+  // 中文注释：回填完必须把 daily_task_counters 推到已用序号之后。少了这一步，
+  //           createTask 会从 1 重新发号，撞上 tasks_public_id 唯一索引；而 createTask
+  //           整个包在 writeTransaction 里，撞索引会整笔回滚、计数器永远不前进 ——
+  //           表现是"迁移之后当天再也建不了任务"，不是"重试几次就好"。
+  //           用 MAX() 合并：库里计数器本来就更靠前时（v3~v5 升上来的库）这一步是空操作。
+  const stamp = new Date().toISOString();
+  const sync = db.prepare(`
+    INSERT INTO daily_task_counters (date_key, next_value, updated_at) VALUES (?, ?, ?)
+    ON CONFLICT(date_key) DO UPDATE SET
+      next_value = MAX(next_value, excluded.next_value),
+      updated_at = excluded.updated_at
+  `);
+  for (const [dateKey, sequence] of counters) sync.run(dateKey, sequence + 1, stamp);
+}
+
 // 中文注释：版本闸 + 逐列幂等升级。返回迁移报告，供测试和 doctor 脚本核对。
 export function migrate(db) {
   const preexistingTasks = tableExists(db, 'tasks');
@@ -173,26 +306,23 @@ export function migrate(db) {
   const addedColumns = [];
   db.exec('BEGIN IMMEDIATE');
   try {
-    // 中文注释：v1 → v2 基础表和列。
     db.exec(BASE_TABLES);
     db.exec(V2_TABLES);
+    db.exec(V3_TABLES);
+    db.exec(V4_TABLES);
+    db.exec(V5_TABLES);
+    db.exec(V6_TABLES);
     for (const [table, columns] of Object.entries(ADDED_COLUMNS)) {
       for (const [column, definition] of columns) {
         if (addColumnIfMissing(db, table, column, definition)) addedColumns.push(`${table}.${column}`);
       }
     }
     db.exec(V2_INDEXES);
-
-    // 中文注释：v2 → v3 父子任务列和索引。
-    if (fromVersion < 3) {
-      for (const [table, columns] of Object.entries(V3_ADDED_COLUMNS)) {
-        for (const [column, definition] of columns) {
-          if (addColumnIfMissing(db, table, column, definition)) addedColumns.push(`${table}.${column}`);
-        }
-      }
-      db.exec(V3_INDEXES);
-    }
-
+    backfillPublicTaskIds(db);
+    db.exec(V3_INDEXES);
+    db.exec(V4_INDEXES);
+    db.exec(V5_INDEXES);
+    db.exec(V6_INDEXES);
     writeSchemaVersion(db, SCHEMA_VERSION);
     db.exec('COMMIT');
   } catch (error) {

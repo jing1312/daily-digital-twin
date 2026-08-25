@@ -1,5 +1,7 @@
-import { mkdir, writeFile, access } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdir, writeFile, access, readFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { randomBytes } from 'node:crypto';
 import { TaskStore } from './core/task-store.mjs';
 import { parseRuntimeCommand, RuntimeCommandError, USAGE } from './core/runtime-command.mjs';
 import { resolveHome, databasePath, HOME_DIRECTORIES, HOME_ENV } from './core/home.mjs';
@@ -9,13 +11,14 @@ import { collectTelemetry, TELEMETRY_HINT } from './core/telemetry.mjs';
 import { decideResourcePolicy } from './core/resource-policy.mjs';
 import { planTasks, groupByParent } from './core/planner.mjs';
 import { createCompositeExecutor } from './core/ai-executor.mjs';
-import { readFile } from 'node:fs/promises';
 
 // 中文注释：所有命令共用同一套 home 解析与配置加载，杜绝 init 写一个目录、status 读另一个目录（修 B13b）。
 
 function print(payload) {
   console.log(JSON.stringify(payload, null, 2));
 }
+
+const REPOSITORY_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
 async function fileExists(path) {
   try {
@@ -26,20 +29,41 @@ async function fileExists(path) {
   }
 }
 
+async function writeNewFile(path, content) {
+  try {
+    await writeFile(path, content, { encoding: 'utf8', flag: 'wx' });
+    return true;
+  } catch (error) {
+    if (error?.code === 'EEXIST') return false;
+    throw error;
+  }
+}
+
 // 中文注释：创建私有目录结构，并写入一份可编辑的默认配置。
 async function initializeHome(home) {
   await Promise.all(HOME_DIRECTORIES.map((directory) => mkdir(join(home, directory), { recursive: true })));
   const configPath = join(home, CONFIG_FILE);
-  let configWritten = false;
-  if (!(await fileExists(configPath))) {
-    await writeFile(configPath, `${JSON.stringify(DEFAULT_CONFIG, null, 2)}\n`, 'utf8');
-    configWritten = true;
-  }
+  const configWritten = await writeNewFile(configPath, `${JSON.stringify(DEFAULT_CONFIG, null, 2)}\n`);
+  const appsWritten = await writeNewFile(
+    join(home, 'config', 'apps.json'),
+    await readFile(join(REPOSITORY_ROOT, 'config', 'apps.example.json'), 'utf8')
+  );
+  const pricingWritten = await writeNewFile(
+    join(home, 'config', 'pricing.json'),
+    await readFile(join(REPOSITORY_ROOT, 'config', 'pricing.example.json'), 'utf8')
+  );
+  const capabilitySecretWritten = await writeNewFile(
+    join(home, 'config', 'capability-hmac.secret'),
+    `${randomBytes(32).toString('hex')}\n`
+  );
   print({
     home,
     directories: HOME_DIRECTORIES,
     configPath: CONFIG_FILE,
     configWritten,
+    appsWritten,
+    pricingWritten,
+    capabilitySecretWritten,
     schedulerEnabled: DEFAULT_CONFIG.scheduler.enabled,
     initializedAt: new Date().toISOString()
   });
@@ -147,6 +171,44 @@ async function runDaemon(home) {
     store.close();
     process.exit(0);
   });
+}
+
+function installShutdown(close) {
+  let closing = false;
+  const shutdown = async () => {
+    if (closing) return;
+    closing = true;
+    try {
+      await close();
+      process.exitCode = 0;
+    } catch (error) {
+      reportError(error);
+    }
+  };
+  process.once('SIGINT', shutdown);
+  process.once('SIGTERM', shutdown);
+}
+
+async function runProductionServer(home) {
+  const { buildProductionRuntime } = await import('./production-runtime.mjs');
+  const runtime = await buildProductionRuntime({ home });
+  const status = await runtime.supervisor.start();
+  installShutdown(() => runtime.supervisor.stop());
+  print({
+    status: 'started',
+    mode: 'serve',
+    home,
+    scheduler: status.scheduler,
+    message: '飞书网关、Daily Twin 调度器和 Multica 同步桥已启动。'
+  });
+}
+
+async function runMcpServer(home, bindingPath = null, bindingSlot = null) {
+  const { buildMcpRuntime } = await import('./production-runtime.mjs');
+  const slotPath = bindingSlot ? `data/workers/slots/${bindingSlot}/capability.binding.json` : null;
+  const runtime = await buildMcpRuntime({ home, bindingPath: bindingPath ?? slotPath });
+  // 中文注释：MCP stdio 的 stdout 是协议通道，不能打印启动提示或日志。
+  installShutdown(() => runtime.close());
 }
 
 // 中文注释：环境自检。把 home、配置来源、WAL、归属账号、调度开关、遥测状态一次性打出来。
@@ -344,6 +406,8 @@ async function main() {
   if (command.command === 'show') return showTask(home, command.taskId);
   if (command.command === 'cost') return showCost(home);
   if (command.command === 'daemon') return runDaemon(home);
+  if (command.command === 'serve') return runProductionServer(home);
+  if (command.command === 'mcp') return runMcpServer(home, command.binding ?? null, command.bindingSlot ?? null);
   if (command.command === 'doctor') return runDoctor(home);
   return updateTask(home, command);
 }

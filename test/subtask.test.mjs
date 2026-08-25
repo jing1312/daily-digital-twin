@@ -123,11 +123,11 @@ describe('task-store v3 — 父子任务关系', { skip: !canRun }, () => {
   });
 });
 
-describe('task-store v3 — schema 迁移', { skip: !canRun }, () => {
-  test('新库迁移到 v3', () => {
+describe('task-store — schema 迁移（v7：并入 Multica 控制面 schema）', { skip: !canRun }, () => {
+  test('新库迁移到 v7', () => {
     const store = createStore();
-    assert.equal(store.schemaVersion, 3);
-    assert.ok(store.migration.migrated || store.migration.fromVersion === 3);
+    assert.equal(store.schemaVersion, 7);
+    assert.ok(store.migration.migrated || store.migration.fromVersion === 7);
     store.close();
   });
 

@@ -42,6 +42,8 @@ export const HOME_DIRECTORIES = [
   'data/screenshots',
   'data/cache',
   'data/logs',
+  'data/workers',
+  'data/locks',
   'config',
   'backups'
 ];

@@ -1,5 +1,7 @@
 # Browser Routing Design
 
+> Historical design only. It depended on the OpenClaw browser bridge and has been superseded by the Microsoft Playwright MCP Edge extension architecture in `docs/ARCHITECTURE.md`.
+
 ## Context
 
 Daily Digital Twin must reuse the user's normal Edge session for authenticated work without silently launching a separate managed browser. Chrome remains available only when the user explicitly requests it or when Edge cannot complete a public, read-only task.
