@@ -204,6 +204,11 @@ export function renderPage(initialConfig, meta) {
   .primary { background: #1668dc; color: #fff; } .primary:hover { background: #0e58c2; }
   .ghost { background: #eef2f6; color: #1c2733; } .ghost:hover { background: #e2e9f0; }
   .hint { font-size: 12px; color: #8595a6; margin-top: 4px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .chip { padding: 4px 10px; border: 1px solid #c9d3dc; border-radius: 999px; font-size: 12px;
+          background: #f2f6fa; color: #1c2733; cursor: pointer; margin: 0; }
+  .chip:hover { background: #e4edf5; }
+  .chip-active { background: #1668dc; border-color: #1668dc; color: #fff; }
   .keyline { display: flex; gap: 8px; align-items: center; }
   .keyline input { flex: 1; }
   .keyline label { margin: 0; white-space: nowrap; display: flex; align-items: center; gap: 4px; }
@@ -241,7 +246,7 @@ export function renderPage(initialConfig, meta) {
       <label><input type="checkbox" onchange="toggleKey('p-key', this)"> 显示</label>
     </div>
     <div class="row">
-      <div><label>模型</label><input type="text" id="p-model" list="p-models"></div>
+      <div><label>模型</label><input type="text" id="p-model"></div>
       <div><label>推理力度</label>
         <select id="p-effort">
           <option value="">默认（不传）</option>
@@ -253,7 +258,7 @@ export function renderPage(initialConfig, meta) {
         </select>
       </div>
     </div>
-    <datalist id="p-models"></datalist>
+    <div class="chips" id="p-model-chips"></div>
     <button class="ghost" onclick="loadModels('planner')">拉取模型列表</button>
     <button class="ghost" onclick="testApi('planner')">测试连通</button>
   </section>
@@ -269,7 +274,7 @@ export function renderPage(initialConfig, meta) {
       <label><input type="checkbox" onchange="toggleKey('e-key', this)"> 显示</label>
     </div>
     <div class="row">
-      <div><label>模型</label><input type="text" id="e-model" list="e-models"></div>
+      <div><label>模型</label><input type="text" id="e-model"></div>
       <div><label>推理力度</label>
         <select id="e-effort">
           <option value="">默认（不传）</option>
@@ -281,7 +286,7 @@ export function renderPage(initialConfig, meta) {
         </select>
       </div>
     </div>
-    <datalist id="e-models"></datalist>
+    <div class="chips" id="e-model-chips"></div>
     <div class="row">
       <div><label>结果输出目录（相对私有目录）</label><input type="text" id="e-output"></div>
       <div><label>超时（毫秒）</label><input type="number" id="e-timeout"></div>
@@ -405,14 +410,22 @@ async function loadModels(section) {
     });
     const data = await res.json();
     if (!data.ok) { show(resultBox, false, '拉取失败[' + data.code + ']：' + data.error); return; }
-    const list = document.getElementById(prefix + '-models');
-    list.innerHTML = '';
+    const chips = document.getElementById(prefix + '-model-chips');
+    chips.innerHTML = '';
     for (const id of data.models) {
-      const option = document.createElement('option');
-      option.value = id;
-      list.appendChild(option);
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'chip';
+      chip.textContent = id;
+      chip.onclick = function () {
+        document.getElementById(prefix + '-model').value = id;
+        const all = chips.querySelectorAll('.chip');
+        for (const other of all) other.classList.remove('chip-active');
+        chip.classList.add('chip-active');
+      };
+      chips.appendChild(chip);
     }
-    show(resultBox, true, '拉到 ' + data.models.length + ' 个模型，模型输入框里可以下拉选了。');
+    show(resultBox, true, '拉到 ' + data.models.length + ' 个模型，点下面的胶囊直接选用。');
   } catch (error) {
     show(resultBox, false, '拉取失败：' + error.message);
   }
