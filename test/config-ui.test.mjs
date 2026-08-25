@@ -3,7 +3,17 @@ import test from 'node:test';
 import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { applyConfigPatch, renderPage, startServer, testChatEndpoint } from '../scripts/config-ui.mjs';
+import { createServer } from 'node:http';
+import {
+  applyConfigPatch,
+  renderPage,
+  startServer,
+  testChatEndpoint,
+  fetchModelList,
+  normalizeEndpoint,
+  modelsUrlFor,
+  normalizePatch
+} from '../scripts/config-ui.mjs';
 import { loadConfig } from '../src/core/config.mjs';
 
 // 中文注释：与 config.test.mjs 同款套路：临时目录当私有 home，用完即删。
@@ -66,6 +76,57 @@ test('applyConfigPatch：module 留空存 null（合法），填了非空串也�
   assert.equal(applyConfigPatch('', { execution: { module: '   ' } }).ok, false);
 });
 
+test('normalizeEndpoint：只填到 /v1 甚至裸域名都能补全成完整接口', () => {
+  assert.equal(normalizeEndpoint('https://api.deepseek.com/v1'), 'https://api.deepseek.com/v1/chat/completions');
+  assert.equal(normalizeEndpoint('https://api.openai.com/v1/'), 'https://api.openai.com/v1/chat/completions');
+  assert.equal(normalizeEndpoint('https://relay.example.com'), 'https://relay.example.com/chat/completions');
+  assert.equal(normalizeEndpoint('https://x.cn/v1/chat/completions'), 'https://x.cn/v1/chat/completions');
+  assert.equal(normalizeEndpoint('   '), null);
+});
+
+test('modelsUrlFor：从接口地址倒推 /models 列表地址', () => {
+  assert.equal(modelsUrlFor('https://api.x.com/v1/chat/completions'), 'https://api.x.com/v1/models');
+});
+
+test('normalizePatch：地址补全 + 空推理力度转 null', () => {
+  const cleaned = normalizePatch({
+    planner: { apiEndpoint: 'https://a.com/v1', reasoningEffort: '' },
+    executor: { apiEndpoint: 'https://b.com/v1/', reasoningEffort: 'high' }
+  });
+  assert.equal(cleaned.planner.apiEndpoint, 'https://a.com/v1/chat/completions');
+  assert.equal(cleaned.planner.reasoningEffort, null);
+  assert.equal(cleaned.executor.apiEndpoint, 'https://b.com/v1/chat/completions');
+  assert.equal(cleaned.executor.reasoningEffort, 'high');
+});
+
+test('applyConfigPatch：reasoningEffort 只认五档，其它整单拒绝', () => {
+  assert.equal(applyConfigPatch('', { planner: { reasoningEffort: 'xhigh' } }).ok, true);
+  assert.equal(applyConfigPatch('', { executor: { reasoningEffort: 'medium' } }).ok, true);
+  const bad = applyConfigPatch('', { planner: { reasoningEffort: 'ultra' } });
+  assert.equal(bad.ok, false);
+  assert.ok(bad.problems.some((p) => p.includes('planner.reasoningEffort')));
+});
+
+test('fetchModelList：兼容 {data:[{id}]} 形态并排序去重', async (t) => {
+  // 中文注释：起一个假服务商，验证"只填 /v1 也能拉到模型列表"。
+  const stub = createServer((req, res) => {
+    if (req.url === '/v1/models') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ data: [{ id: 'model-b' }, { id: 'model-a' }, { id: 'model-a' }] }));
+      return;
+    }
+    res.writeHead(404); res.end('{}');
+  });
+  await new Promise((resolve) => stub.listen(0, '127.0.0.1', resolve));
+  t.after(() => stub.close());
+  const base = `http://127.0.0.1:${stub.address().port}/v1`;
+
+  const got = await fetchModelList({ apiEndpoint: base, apiKey: 'EXAMPLE-stub' });
+  assert.equal(got.ok, true);
+  assert.deepEqual(got.models, ['model-a', 'model-b']);
+  assert.equal(got.url, `${base}/models`);
+});
+
 test('renderPage：注入的 INITIAL 转义了 <，不会提前闭合 script 标签', () => {
   const html = renderPage({ planner: { apiKey: '</script><b>x' } }, { home: 'h', configPath: 'p', exists: false });
   assert.ok(html.includes('<!doctype html>'));
@@ -98,12 +159,18 @@ withHome((home) => {
     const { config } = await loadConfig(home);
     assert.equal(config.planner.model, 'test-model');
 
-    // 中文注释：把测试请求打回本服务的 /api/save——它返回的是 JSON 但没有
-    // 中文注释：choices 字段，正好走"通了但响应不对"的结构化失败路径，不依赖外网。
+    // 中文注释：连通测试的"通了但响应不对"路径：起一个只回普通 JSON 的桩服务商，
+    // 中文注释：不依赖外网，也顺便覆盖地址补全（只填 /v1）。
+    const stub = createServer((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ hello: 'world' }));
+    });
+    await new Promise((resolve) => stub.listen(0, '127.0.0.1', resolve));
+    t.after(() => stub.close());
     const testRes = await fetch(`${base}/api/test`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ apiEndpoint: `${base}/api/save`, apiKey: 'EXAMPLE-stub', model: 'x' })
+      body: JSON.stringify({ apiEndpoint: `http://127.0.0.1:${stub.address().port}/v1`, apiKey: 'EXAMPLE-stub', model: 'x' })
     });
     const tested = await testRes.json();
     assert.equal(tested.ok, false);

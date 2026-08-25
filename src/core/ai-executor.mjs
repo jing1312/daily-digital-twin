@@ -28,7 +28,7 @@ export class ExecutorError extends Error {
 }
 
 // 中文注释：调用 AI API 执行任务。返回 AI 的回答文本。
-async function callAI({ apiEndpoint, apiKey, model, messages, timeoutMs }) {
+async function callAI({ apiEndpoint, apiKey, model, messages, timeoutMs, reasoningEffort = null }) {
   if (!apiEndpoint) throw new ExecutorError('未配置 executor.apiEndpoint', 'missing_endpoint');
   if (!apiKey) throw new ExecutorError('未配置 executor.apiKey', 'missing_key');
 
@@ -36,13 +36,16 @@ async function callAI({ apiEndpoint, apiKey, model, messages, timeoutMs }) {
   const timer = setTimeout(() => controller.abort(), Math.max(1000, Number(timeoutMs) || 60000));
 
   try {
+    const payload = { model, messages, temperature: 0.3 };
+    // 中文注释：推理力度（reasoning_effort）只在显式配置时携带，兼容不支持该参数的服务商。
+    if (reasoningEffort) payload.reasoning_effort = reasoningEffort;
     const response = await fetch(apiEndpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${apiKey}`
       },
-      body: JSON.stringify({ model, messages, temperature: 0.3 }),
+      body: JSON.stringify(payload),
       signal: controller.signal
     });
 
@@ -109,6 +112,7 @@ export async function createAIExecutor({ home = null, config = {} } = {}) {
         apiKey: executorConfig.apiKey,
         model: executorConfig.model,
         timeoutMs: executorConfig.timeoutMs,
+        reasoningEffort: executorConfig.reasoningEffort ?? null,
         messages: [
           { role: 'system', content: executorConfig.systemPrompt },
           { role: 'user', content: task.request }
