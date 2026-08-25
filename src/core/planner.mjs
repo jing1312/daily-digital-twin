@@ -79,7 +79,7 @@ export function passthroughPlan(tasks) {
 }
 
 // 中文注释：调用 OpenAI 兼容 API。fetch 是 Node 18+ 内置的，不需要额外依赖。
-async function callChatAPI({ apiEndpoint, apiKey, model, messages, timeoutMs }) {
+async function callChatAPI({ apiEndpoint, apiKey, model, messages, timeoutMs, reasoningEffort = null }) {
   if (!apiEndpoint) throw new PlannerError('未配置 planner.apiEndpoint', 'missing_endpoint');
   if (!apiKey) throw new PlannerError('未配置 planner.apiKey', 'missing_key');
 
@@ -87,13 +87,18 @@ async function callChatAPI({ apiEndpoint, apiKey, model, messages, timeoutMs }) 
   const timer = setTimeout(() => controller.abort(), Math.max(1000, Number(timeoutMs) || 30000));
 
   try {
+    const payload = { model, messages, temperature: 0.3, response_format: { type: 'json_object' } };
+    // 中文注释：推理力度（reasoning_effort）只在显式配置时携带，兼容不支持该参数的服务商。
+    if (reasoningEffort) payload.reasoning_effort = reasoningEffort;
     const response = await fetch(apiEndpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`
+        Authorization: `Bearer ${apiKey}`,
+        // 中文注释：部分中转站按 User-Agent 放行客户端（实测缺失时 401），统一标识为 codex CLI。
+        'User-Agent': 'codex_cli_rs/0.21.0'
       },
-      body: JSON.stringify({ model, messages, temperature: 0.3, response_format: { type: 'json_object' } }),
+      body: JSON.stringify(payload),
       signal: controller.signal
     });
 
@@ -154,6 +159,7 @@ export async function planTasks(tasks, config = {}) {
     apiKey: merged.apiKey,
     model: merged.model,
     timeoutMs: merged.timeoutMs,
+    reasoningEffort: merged.reasoningEffort ?? null,
     messages: [
       { role: 'system', content: merged.systemPrompt },
       { role: 'user', content: `这是我的任务列表：\n\n${userContent}` }
