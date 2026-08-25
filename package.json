@@ -14,6 +14,7 @@
     "selftest:ps": "pwsh -NoProfile -File platform/windows/Test-DailyTwinPlatform.ps1",
     "runtime": "node --disable-warning=ExperimentalWarning src/runtime.mjs",
     "doctor": "node --disable-warning=ExperimentalWarning src/runtime.mjs doctor",
+    "config": "node --disable-warning=ExperimentalWarning scripts/config-ui.mjs",
     "check": "npm test && npm run audit:privacy && npm run smoke"
   },
   "dependencies": {
