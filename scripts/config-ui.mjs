@@ -345,13 +345,17 @@ function toggleKey(id, box) {
   document.getElementById(id).type = box.checked ? 'text' : 'password';
 }
 
+// 中文注释：底部提示条。显式取元素，不依赖"元素 id 变全局变量"的非标准行为。
+const resultBox = document.getElementById('result');
+
 // 中文注释：地址补全的即时预览——用户只填 /v1，下面实时显示最终会保存的完整接口。
 function hintEndpoint(prefix) {
   const value = get(prefix + '-endpoint');
   const hint = document.getElementById(prefix + '-hint');
   if (!value) { hint.textContent = ''; return; }
-  let text = value.trim().replace(/\/+$/, '');
-  if (!/\/chat\/completions$/i.test(text)) text += '/chat/completions';
+  let text = value.trim();
+  while (text.endsWith('/')) text = text.slice(0, -1);
+  if (!text.toLowerCase().endsWith('/chat/completions')) text += '/chat/completions';
   hint.textContent = '将保存为：' + text;
 }
 
@@ -359,14 +363,14 @@ function hintEndpoint(prefix) {
 async function loadModels(section) {
   const prefix = section === 'planner' ? 'p' : 'e';
   const body = { apiEndpoint: get(prefix + '-endpoint'), apiKey: get(prefix + '-key') };
-  show(result, true, '正在拉取模型列表……');
+  show(resultBox, true, '正在拉取模型列表……');
   try {
     const res = await fetch('/api/models', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     });
     const data = await res.json();
-    if (!data.ok) { show(result, false, '拉取失败[' + data.code + ']：' + data.error); return; }
+    if (!data.ok) { show(resultBox, false, '拉取失败[' + data.code + ']：' + data.error); return; }
     const list = document.getElementById(prefix + '-models');
     list.innerHTML = '';
     for (const id of data.models) {
@@ -374,9 +378,9 @@ async function loadModels(section) {
       option.value = id;
       list.appendChild(option);
     }
-    show(result, true, '拉到 ' + data.models.length + ' 个模型，模型输入框里可以下拉选了。');
+    show(resultBox, true, '拉到 ' + data.models.length + ' 个模型，模型输入框里可以下拉选了。');
   } catch (error) {
-    show(result, false, '拉取失败：' + error.message);
+    show(resultBox, false, '拉取失败：' + error.message);
   }
 }
 
@@ -416,11 +420,11 @@ async function save() {
   });
   const data = await res.json();
   if (data.ok) {
-    show(result, true, '已保存到 ' + data.path + '（' + new Date(data.savedAt).toLocaleTimeString() + '）。daemon 正在跑的话需要重启才生效。');
+    show(resultBox, true, '已保存到 ' + data.path + '（' + new Date(data.savedAt).toLocaleTimeString() + '）。daemon 正在跑的话需要重启才生效。');
   } else if (data.problems) {
-    show(result, false, '校验未通过，没有写盘：\\n- ' + data.problems.join('\\n- '));
+    show(resultBox, false, '校验未通过，没有写盘：\\n- ' + data.problems.join('\\n- '));
   } else {
-    show(result, false, data.fatal || data.error || '保存失败');
+    show(resultBox, false, data.fatal || data.error || '保存失败');
   }
 }
 
@@ -430,16 +434,16 @@ async function testApi(section) {
     apiEndpoint: get(prefix + '-endpoint'), apiKey: get(prefix + '-key'), model: get(prefix + '-model'),
     reasoningEffort: get(prefix + '-effort') || null
   };
-  show(result, true, '正在测试……');
+  show(resultBox, true, '正在测试……');
   const res = await fetch('/api/test', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
   });
   const data = await res.json();
   if (data.ok) {
-    show(result, true, '连通成功（' + data.latencyMs + ' ms）模型回复：' + data.reply);
+    show(resultBox, true, '连通成功（' + data.latencyMs + ' ms）模型回复：' + data.reply);
   } else {
-    show(result, false, '连通失败[' + data.code + ']：' + data.error);
+    show(resultBox, false, '连通失败[' + data.code + ']：' + data.error);
   }
 }
 </script>
