@@ -77,25 +77,25 @@ test('applyConfigPatch：module 留空存 null（合法），填了非空串也�
 });
 
 test('normalizeEndpoint：只填到 /v1 甚至裸域名都能补全成完整接口', () => {
-  assert.equal(normalizeEndpoint('https://api.deepseek.com/v1'), 'https://api.deepseek.com/v1/chat/completions');
+  assert.equal(normalizeEndpoint('https://example.com/v1'), 'https://example.com/v1/chat/completions');
   assert.equal(normalizeEndpoint('https://api.openai.com/v1/'), 'https://api.openai.com/v1/chat/completions');
   assert.equal(normalizeEndpoint('https://relay.example.com'), 'https://relay.example.com/chat/completions');
-  assert.equal(normalizeEndpoint('https://x.cn/v1/chat/completions'), 'https://x.cn/v1/chat/completions');
+  assert.equal(normalizeEndpoint('https://example.invalid/v1/chat/completions'), 'https://example.invalid/v1/chat/completions');
   assert.equal(normalizeEndpoint('   '), null);
 });
 
 test('modelsUrlFor：从接口地址倒推 /models 列表地址', () => {
-  assert.equal(modelsUrlFor('https://api.x.com/v1/chat/completions'), 'https://api.x.com/v1/models');
+  assert.equal(modelsUrlFor('https://example.com/v1/chat/completions'), 'https://example.com/v1/models');
 });
 
 test('normalizePatch：地址补全 + 空推理力度转 null', () => {
   const cleaned = normalizePatch({
-    planner: { apiEndpoint: 'https://a.com/v1', reasoningEffort: '' },
-    executor: { apiEndpoint: 'https://b.com/v1/', reasoningEffort: 'high' }
+    planner: { apiEndpoint: 'https://example.com/v1', reasoningEffort: '' },
+    executor: { apiEndpoint: 'https://example.invalid/v1/', reasoningEffort: 'high' }
   });
-  assert.equal(cleaned.planner.apiEndpoint, 'https://a.com/v1/chat/completions');
+  assert.equal(cleaned.planner.apiEndpoint, 'https://example.com/v1/chat/completions');
   assert.equal(cleaned.planner.reasoningEffort, null);
-  assert.equal(cleaned.executor.apiEndpoint, 'https://b.com/v1/chat/completions');
+  assert.equal(cleaned.executor.apiEndpoint, 'https://example.invalid/v1/chat/completions');
   assert.equal(cleaned.executor.reasoningEffort, 'high');
 });
 
