@@ -1,11 +1,14 @@
 {
   "database": "data/runtime.sqlite",
   "maxSlots": 4,
-  "openTaskLimit": 16,
+  "openTaskLimit": 4,
   "busyTimeoutMs": 5000,
   "resource": {
     "cpuLimitPercent": 55,
-    "minAvailableMemoryGb": 8,
+    "minAvailableMemoryGb": 4,
+    "oneSlotMemoryGb": 4,
+    "twoSlotMemoryGb": 6,
+    "fourSlotMemoryGb": 10,
     "minDiskFreeGb": 20,
     "batterySlotLimit": 1,
     "maxSlots": 4
@@ -24,7 +27,7 @@
   "scheduler": {
     "enabled": false,
     "pollSeconds": 5,
-    "maxParallelWorkers": 2,
+    "maxParallelWorkers": 4,
     "maxForegroundTasks": 1
   },
   "browser": {
@@ -32,7 +35,10 @@
     "signedInProfile": null,
     "snapshotMode": "efficient",
     "edgeUserDataDir": null,
-    "managedLoggedInHosts": []
+    "managedLoggedInHosts": [],
+    "defaultBrowser": "msedge",
+    "extension": true,
+    "playwrightCommand": "playwright-mcp"
   },
   "storage": {
     "maxCacheMb": 2048,
@@ -43,7 +49,8 @@
     "logKeepFiles": 7
   },
   "execution": {
-    "requireEvidence": true
+    "requireEvidence": true,
+    "workerMaxMinutes": 90
   },
   "planner": {
     "_comment": "AI 规划器：用于 morning 命令的任务分解。把 apiEndpoint 和 apiKey 填上你的 OpenAI 兼容 API。",
@@ -60,5 +67,31 @@
     "model": "gpt-4o-mini",
     "outputDir": "data/outputs",
     "timeoutMs": 60000
+  },
+  "integrations": {
+    "appCatalog": "config/apps.json",
+    "pricing": "config/pricing.json",
+    "capabilitySecretFile": "config/capability-hmac.secret",
+    "feishu": {
+      "appId": null,
+      "appSecretFile": "config/feishu-app-secret.secret",
+      "allowedOpenIds": [],
+      "allowFirstPairing": false
+    },
+    "multica": {
+      "enabled": true,
+      "command": "multica",
+      "plannerAgent": "dt-planner",
+      "workerAgents": [
+        "dt-worker-1",
+        "dt-worker-2",
+        "dt-worker-3",
+        "dt-worker-4"
+      ],
+      "allowedDirectories": []
+    }
+  },
+  "windows": {
+    "pwshPath": null
   }
 }

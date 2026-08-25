@@ -26,6 +26,8 @@ export const USAGE = [
   'runtime batch <文件路径>               从文件批量导入任务（每行一个）',
   'runtime morning <文件路径> [--enable] [--dry-run]  晨间工作流：AI 规划 + 批量创建 + 可选启动调度',
   'runtime daemon                         前台运行调度循环（需先 enable）',
+  'runtime serve                          启动飞书 + Multica + 本机控制平面',
+  'runtime mcp --binding-slot <worker>    启动绑定到 Multica worker 的高层 MCP（stdio）',
   'runtime doctor                         打印运行环境自检信息'
 ].join('\n');
 
@@ -75,6 +77,27 @@ function parseLimit(tail, defaultValue = 20) {
   return defaultValue;
 }
 
+// 中文注释：提取 `--name value` 或 `--name=value` 形式的参数（PR #2 引入，供 mcp 命令使用）。
+function extractValue(args, name) {
+  const prefix = `${name}=`;
+  for (let index = 0; index < args.length; index += 1) {
+    const value = args[index];
+    if (value === name) {
+      const next = args[index + 1];
+      if (!next || String(next).startsWith('--')) {
+        throw new RuntimeCommandError(`${name} 需要一个路径参数`, `missing_${name.slice(2).replaceAll('-', '_')}_value`);
+      }
+      return String(next);
+    }
+    if (String(value).startsWith(prefix)) {
+      const next = String(value).slice(prefix.length);
+      if (!next) throw new RuntimeCommandError(`${name} 需要一个路径参数`, `missing_${name.slice(2).replaceAll('-', '_')}_value`);
+      return next;
+    }
+  }
+  return null;
+}
+
 export function parseRuntimeCommand(args) {
   const { home, rest } = extractHome(Array.isArray(args) ? args : []);
   const [command, ...tail] = rest;
@@ -90,7 +113,20 @@ export function parseRuntimeCommand(args) {
     return withHome({ command, taskId: parseTaskId(tail[0], command) });
   }
 
-  if (command === 'status' || command === 'daemon' || command === 'doctor' || command === 'tree' || command === 'cost') {
+  // 中文注释：PR #2：mcp 命令，启动绑定到 Multica worker 的高层 MCP。
+  if (command === 'mcp') {
+    const binding = extractValue(tail, '--binding');
+    const bindingSlot = extractValue(tail, '--binding-slot');
+    if (binding && bindingSlot) {
+      throw new RuntimeCommandError('--binding 与 --binding-slot 不能同时使用', 'conflicting_binding_source');
+    }
+    if (bindingSlot && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(bindingSlot)) {
+      throw new RuntimeCommandError('binding slot 名称非法', 'invalid_binding_slot');
+    }
+    return withHome(binding ? { command, binding } : (bindingSlot ? { command, bindingSlot } : { command }));
+  }
+
+  if (command === 'status' || command === 'daemon' || command === 'serve' || command === 'doctor' || command === 'tree' || command === 'cost') {
     return withHome({ command });
   }
 

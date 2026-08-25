@@ -26,11 +26,13 @@ function withHiddenCode(result, code) {
 // 中文注释：未指定任务编号时给出候选，不再让 taskId=null 直接穿到数据库（修 B4）。
 function resolveTarget(store, kind, taskId) {
   if (taskId !== null && taskId !== undefined) {
-    const task = store.getTask(taskId);
+    const task = store.getTaskByReference(taskId);
     if (!task) return { ok: false, code: 'not_found', message: `任务 ${taskId} 不存在`, taskId };
     return { ok: true, task };
   }
-  const candidates = kind === '继续' ? store.listPausedTasks() : store.listActiveTasks();
+  const candidates = kind === '继续'
+    ? store.listActiveTasks().filter((task) => task.paused || task.state === 'waiting_for_user')
+    : store.listActiveTasks();
   const eligible = kind === '暂停' ? candidates.filter((task) => !task.paused) : candidates;
   if (eligible.length === 0) {
     return { ok: false, code: 'no_candidates', message: `当前没有可${kind}的任务。` };
@@ -53,7 +55,12 @@ export function handleFeishuText(store, text, sender) {
   const routed = resolveIncomingMessage(store, text);
 
   if (routed.kind === 'new_task') {
-    const task = store.createTask({ request: routed.request, ownerOpenId: identity.openId });
+    const task = store.createTask({
+      request: routed.request,
+      ownerOpenId: identity.openId,
+      replyChatId: sender?.chatId ?? null,
+      sourceMessageId: sender?.messageId ?? null
+    });
     return { action: 'created', task, pairedNow: identity.pairedNow };
   }
 
@@ -61,14 +68,24 @@ export function handleFeishuText(store, text, sender) {
     return { action: 'status', tasks: store.listActiveTasks() };
   }
 
+  if (routed.kind === '看证据') {
+    const receipt = routed.taskRef || routed.taskId
+      ? store.getTerminalReceipt(store.getTaskByReference(routed.taskRef ?? routed.taskId)?.id)
+      : store.getLatestTerminalReceipt();
+    if (!receipt) {
+      return { action: 'needs_clarification', reason: 'evidence_not_found', message: '没有找到该任务的终态证据。' };
+    }
+    return { action: 'evidence', receipt };
+  }
+
   if (routed.kind === '暂停' || routed.kind === '继续' || routed.kind === '取消') {
-    const target = resolveTarget(store, routed.kind, routed.taskId);
+    const target = resolveTarget(store, routed.kind, routed.taskRef ?? routed.taskId);
     if (!target.ok) {
       return { action: 'needs_clarification', reason: target.code, message: target.message, candidates: target.candidates ?? [] };
     }
     if (routed.kind === '暂停') return { action: 'paused', task: store.pause(target.task.id) };
     if (routed.kind === '继续') {
-      const result = store.resume(target.task.id);
+      const result = store.continueTask(target.task.id);
       if (!result.ok) return { action: 'resume_refused', reason: result.code, message: result.message, task: result.task };
       return { action: 'resumed', task: result.task };
     }
@@ -79,8 +96,8 @@ export function handleFeishuText(store, text, sender) {
   }
 
   if (routed.kind === 'verification_code') {
-    const task = store.getTask(routed.taskId);
-    if (!task) return { action: 'needs_clarification', reason: 'not_found', message: `任务 ${routed.taskId} 不存在` };
+    const task = store.getTaskByReference(routed.taskRef ?? routed.taskId);
+    if (!task) return { action: 'needs_clarification', reason: 'not_found', message: `任务 ${routed.taskRef ?? routed.taskId} 不存在` };
     if (task.paused) {
       // 中文注释：暂停期间收到验证码不建新任务，也不丢弃，提示先继续任务（修 B1 的连带问题）。
       return withHiddenCode(

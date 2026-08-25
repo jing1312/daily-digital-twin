@@ -1,5 +1,7 @@
 # 浏览器路线选择（为什么"用 Edge"一直没成功）
 
+> **历史文档，不再是当前部署方案。** Daily Twin 已移除 OpenClaw 浏览器主链；当前实现固定使用 Microsoft Playwright MCP 的 `--browser msedge --extension`，见 [`ARCHITECTURE.md`](ARCHITECTURE.md) 和 [`RUNBOOK.md`](RUNBOOK.md)。本文件只保留早期故障分析，不能用于新安装。
+
 > 这份文档取代 `docs/superpowers/specs/2026-07-27-browser-routing-design.md` 里
 > "Edge is the default for every browser task" 这条策略。那句话是错的，见下文"更正记录"。
 
