@@ -13,6 +13,15 @@
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
+# 中文注释：WorkBuddy、VS Code 终端等 Electron 宿主的子进程会继承 ELECTRON_RUN_AS_NODE=1。
+# 中文注释：这个变量不清掉，Start-Process 启动的 Electron 应用（VS Code 等）会被当成纯 Node 运行：
+# 中文注释启动器静默退出 0、不开窗口、不留进程，看起来就像"应用启动后立即退出"。
+# 中文注释：本库被所有 platform/windows 脚本点号引入，在这里清一次即可覆盖全部启动路径。
+if (Test-Path Env:\ELECTRON_RUN_AS_NODE) {
+    Remove-Item Env:\ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
+    Write-Verbose '已清理继承自宿主的 ELECTRON_RUN_AS_NODE，避免 Electron 应用被当作纯 Node 启动。'
+}
+
 # 中文注释：把控制台和管道都切到不带 BOM 的 UTF-8，否则中文回执在飞书里会变成乱码
 # 中文注释：（本机实测过 "璇峰湪娴忚鍣ㄥ畬鎴" 这种典型的 UTF-8 被按 GBK 解读的结果）。
 function Set-DailyTwinConsoleEncoding {
