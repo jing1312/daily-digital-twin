@@ -308,6 +308,7 @@ export function renderPage(initialConfig, meta) {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Daily Twin 私有配置</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='1' y='1' width='14' height='14' rx='3' fill='%231668dc'/%3E%3Ccircle cx='8' cy='8' r='3.2' fill='%23fff'/%3E%3C/svg%3E">
 <style>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
@@ -355,6 +356,15 @@ export function renderPage(initialConfig, meta) {
     label, .hint, .meta { color: #8fa1b5; }
     .ok { background: #12301e; border-color: #2c5c3e; color: #9fe0bb; }
     .bad { background: #341a1a; border-color: #6b3434; color: #f2b8b8; }
+    th { color: #8fa1b5; }
+    th, td { border-bottom-color: #263340; }
+    .chip { background: #1f2a36; border-color: #37465a; color: #dbe4ee; }
+    .chip:hover { background: #26344a; }
+    .chip-active { background: #1668dc; border-color: #1668dc; color: #fff; }
+    .st-completed { background: #12301e; color: #9fe0bb; }
+    .st-running, .st-queued, .st-retrying { background: #14283f; color: #7db4ec; }
+    .st-partial, .st-failed { background: #341a1a; color: #f2b8b8; }
+    .st-cancelled, .st-paused, .st-waiting_for_user { background: #202a35; color: #8fa1b5; }
   }
 </style>
 </head>

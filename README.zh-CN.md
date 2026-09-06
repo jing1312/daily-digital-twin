@@ -1,168 +1,130 @@
 # Daily Digital Twin
 
-一个运行在 Windows 本机上的个人工作替身框架：手机通过飞书派发任务，本机在**已登录的浏览器会话**里执行网页操作，并用受限的应用目录启动桌面软件。源码公开，运行数据私有。
+[English](README.md) | **简体中文**
 
-## 设计边界
+[![CI](https://github.com/jing1312/daily-digital-twin/actions/workflows/ci.yml/badge.svg)](https://github.com/jing1312/daily-digital-twin/actions/workflows/ci.yml)
+![Node](https://img.shields.io/badge/node-%3E%3D24-185FA5)
+![dependencies](https://img.shields.io/badge/runtime%20dependencies-0-0F6E56)
+![license](https://img.shields.io/badge/license-MIT-444441)
 
-- 本地不运行大模型；模型推理仍走你配置的兼容接口。云端只做计划，本机复核后才执行。
-- 最多四个任务槽；同一软件、文件或网页标签页互斥；桌面自动化同时只允许一个（前台独占）。
-- 验证码、登录弹窗和人工判断会暂停任务，验证码只在内存中传给当前页面，不落盘、不进回执。
-- 删除、覆盖、上传、付款、发送和公开发布仍需人工确认。
-- **执行必须留证。** 没有进程 / 窗口 / 页面 / 文件四类证据之一，任务只会被判为 `partial`，绝不谎报 `completed`。
-- 飞书身份采用**首次配对即绑定**：第一个发消息的人成为主人，之后其他人一律拒绝。
+一个跑在 Windows 本机上的隐私优先个人自动化运行时。任务从手机、终端或网页仪表盘进来，本地调度器用受控执行器去干，并且**报不出证据就绝不说 completed** —— 拿不出进程 / 窗口 / 页面 / 文件四类证据之一的任务，只会如实判为 `partial`。
 
-## 浏览器：先读这一节
+三条原则贯穿全部代码：
 
-README 的旧版本写着"Edge 浏览器动作通过 OpenClaw 已配对的 `chrome` profile 执行"，**这句话是错的**。
+| 原则 | 怎么落实 |
+| --- | --- |
+| 诚实 | 无证据 → `partial`，绝不谎报 `completed`。 |
+| 失败关闭 | 配置错了拒绝运行；执行器装载失败拒绝启动；遥测缺失就是 0 个调度槽。 |
+| 私密外置 | 密钥、数据库、输出、日志全在仓库外的私有 `DAILY_TWIN_HOME`，CI 里的隐私审计把关。 |
 
-OpenClaw 内置的 `chrome` profile 按定义就是 Chrome 扩展（`driver: "extension"`），本地启动的自动探测顺序是
-Chrome → Brave → Edge → Chromium → Chrome Canary。也就是说 `--browser-profile chrome` 命中的是 Chrome，不是 Edge。
+![架构](docs/assets/architecture.svg)
 
-三条可用路线的完整对比、各自的前置条件，以及"没人在电脑前"时哪一条真的成立，见
-[`docs/BROWSER-PROFILES.md`](docs/BROWSER-PROFILES.md)。默认配置走 `openclaw` 托管 profile（可无人值守，代价是首次要在替身专用浏览器里单独登录一次）。
+## 它能干什么
 
-## 目录
+**命令层** —— `create`、`batch`、`morning`、`status`、`tree`、`history`、`show`、`cost`、`pause`/`resume`/`cancel`、`scheduler`、`daemon`/`serve`、`mcp`、`doctor`、`config`。
 
-```text
-src/core/            公开任务内核、策略与路由
-src/runtime.mjs      命令行入口
-platform/windows/    Windows 启动、遥测、备份与修复脚本
-config/*.example.*   脱敏示例配置
-docs/                运行手册、浏览器路线、架构、缺陷修复记录
-test/                Node 内置测试
-scripts/             隐私审计
-```
+- `morning` 接收一份纯文本任务清单，交给 AI planner 分解成父子任务树，类型为 `ai_call`、`desktop` 或 `browser`。父任务只是容器，等所有子任务到终态后由调度器自动收尾。
+- `batch` 不走 AI，直接批量导入同一份清单。
+- `show` 打印任务的完整事件流、证据和 token 记账。
 
-私有实例放在本机的 `DAILY_TWIN_HOME` 目录，其中的 `data/`、`config/runtime.json`、截图、日志、浏览器会话和真实应用路径都不进入本仓库。
+**执行器**
 
-## 私有目录是必填项
+- `ai_call` —— 走 OpenAI 兼容接口，token 账本按任务记录（输入、缓存输入、输出、延迟、本地估价）。
+- `desktop` / `browser` —— 从 `DAILY_TWIN_HOME` 里的私有执行器模块装载（例如 `executor/index.mjs`）。自带的私有执行器能打开已登记的应用、网站和网址，并上报进程与窗口证据；没有私有执行器时，这些类型如实返回 `partial`。
+- `unknown` —— 原样跳过，不瞎猜。
 
-`DAILY_TWIN_HOME` **没有仓库内的兜底路径**。没配置时命令行会直接以退出码 1 失败并给出设置方法，而不是偷偷把运行数据写在公开仓库旁边（这是本轮修掉的 B13b/B14）。
+**飞书控制面**（`serve`）—— WebSocket 网关，首次发消息的人绑定为唯一所有者，之后其他人一律拒绝；支持任务派发与控制命令（`status`、`pause`、`resume`、`cancel`、查证据），回执统一脱敏。
+
+**Multica worker 体系** —— 复杂任务由 planner 拆成最多四个隔离的 Codex worker。worker 持有 HMAC 签名的一次性能力票，绑定任务号、issue、worker、允许的网站 / 软件 / 目录白名单和过期时间。worker 只能调用高层本机 MCP 工具（`browser_open/fill/submit/wait/capture`、`app_launch`、`task_checkpoint`），拿不到 shell。
+
+**配置网页**（`npm run config`）—— 编辑规划器 / 执行器接口、从服务商拉取模型列表直接落库、查看未结束任务 / 历史 / token 花费、一键启停 daemon，全在 `127.0.0.1:18791` 本机完成。
+
+## 安全边界
+
+这个项目能接触已登录的浏览器会话和本机软件，所以刻意保守：
+
+- 远端模型只出计划，不受信任；任何动作都在本机复核后才执行。
+- 调度器默认休眠，必须显式启用。
+- 验证码、登录弹窗和需要人工判断的场景会暂停进入 `waiting_for_user`，不擅自应付。
+- 验证码只传给当前活动页面，不落盘、不进回执、不进数据库 / 日志 / 缓存。
+- 桌面自动化前台独占；软件、文件、标签页按任务互斥锁定。
+- 删除、覆盖、上传、付款、发送、公开发布仍需人工确认。
+- 密钥和私有路径永不进仓库 —— 隐私审计在本地和 CI 都会跑。
+
+这些手段降低风险，但不等于无人值守的浏览器 / 桌面自动化普遍安全。接入真实账号前，先过一遍配置和威胁模型。
+
+## 资源策略
+
+重活按本机实时遥测伸缩：
+
+| 条件 | 槽位 |
+| --- | ---:|
+| 可用内存 ≥ 10 GB 且 CPU < 55% | 最多 4 |
+| 可用内存 6~10 GB | 2 |
+| 可用内存 4~6 GB | 1 |
+| 不足 4 GB、磁盘紧张或遥测过期 | 0 |
+| 电池供电 | ≤ 1 |
+
+遥测缺失不是边缘情况 —— 直接停调度。
+
+## 任务生命周期
+
+![证据门控](docs/assets/evidence-gate.svg)
+
+## 快速上手
+
+环境要求：Windows 11（部署目标）、Node.js ≥ 24、平台脚本需要 PowerShell 7。无需 `npm install` —— 零运行时与开发依赖。
 
 ```powershell
-# 建议放在 D 盘，避免占满系统盘
-# 注意参数名是 -PrivateHome 而不是 -Home：$Home 是 PowerShell 自动变量，占用它就是 B18 那类缺陷
+# 1. 把 DAILY_TWIN_HOME 指向仓库外的私有目录
 .\platform\windows\Set-DailyTwinPaths.ps1 -PrivateHome 'D:\DailyTwin\home'
-```
-
-完整的开机到日常运维步骤见 [`docs/RUNBOOK.md`](docs/RUNBOOK.md)。
-
-## 开发
-
-需要 Node.js 24 或更高版本（用到 `node:sqlite`）。零运行时依赖，不需要 `npm install`。
-
-```powershell
-npm test              # 132 条单元测试
-npm run audit:privacy # 隐私审计：密钥、真实本机路径、中转地址
-npm run smoke         # CLI 冒烟：端到端行为，含"不该产生的副作用"
-npm run check         # 上面三条一起跑，提交前必须绿
-```
-
-Windows 侧另有两条（需要 pwsh）：
-
-```powershell
-npm run lint:ps       # 语法解析 + BOM 检查 + PSScriptAnalyzer
-npm run selftest:ps   # 脚本层运行时自检
-```
-
-改造过程中确认并修掉的 24 个缺陷，逐条对应到代码位置和守它的测试，见
-[`docs/BUGFIX-LOG.md`](docs/BUGFIX-LOG.md)。整体设计与取舍见
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)（英文）。
-
-初始化私有运行目录并创建任务：
-
-```powershell
 $env:DAILY_TWIN_HOME = 'D:\DailyTwin\home'
+
+# 2. 初始化并自检
 npm run runtime -- init
-npm run runtime -- create '打开 Biomni，在输入框输入 TEST_TEXT'
+npm run runtime -- doctor
+
+# 3. 派活
+npm run runtime -- create '总结今天的日程'
+npm run runtime -- morning .\tasks.txt --enable   # 规划 + 分解 + 启动调度器
 npm run runtime -- status
-npm run runtime -- doctor    # 检查库、迁移版本、遥测与磁盘
+npm run runtime -- show 1
+
+# 4. 按需注册计划任务（先预览）
+.\platform\windows\Install-DailyTwinServices.ps1 -PrivateHome $env:DAILY_TWIN_HOME -WhatIf
+.\platform\windows\Install-DailyTwinServices.ps1 -PrivateHome $env:DAILY_TWIN_HOME
 ```
 
-## 调度器默认休眠
+启用 AI 规划器 / 执行器：在私有 `config/runtime.json` 里配 planner 和 executor 接口，用 `npm run config` 最省事。
 
-`scheduler.enabled` 默认 `false`。装好之后替身**不会**自己开始跑任务，必须显式开启：
+开始常规运行前，先读 [`docs/RUNBOOK.md`](docs/RUNBOOK.md)。
 
-```powershell
-npm run runtime -- scheduler status
-npm run runtime -- scheduler enable
+## 验证
+
+```bash
+npm test              # 387 个单元测试
+npm run audit:privacy # 密钥 / 私有路径不得进仓库
+npm run smoke         # CLI 冒烟
+npm run check         # 测试 + 审计 + 冒烟
 ```
 
-资源策略是 fail-closed 的：拿不到 CPU 占用和是否接电源，就判定为"遥测缺失"，槽位归零、不接新动作。
-Windows 上由 `platform/windows/Write-DailyTwinTelemetry.ps1` 定期写入 `data/telemetry.json`；
-调试时也可以用 `DAILY_TWIN_CPU_PERCENT` 和 `DAILY_TWIN_ON_AC_POWER` 两个环境变量临时覆盖。
+Windows 额外跑 `npm run lint:ps` 和 `npm run selftest:ps`（PowerShell 解析、编码、平台自测）。CI 在 Linux 和 Windows 双平台、Node 24 下执行以上全部。
 
-## 晨间工作流：批量发任务 → AI 分解 → 调度执行
+## 文档
 
-这是 v3 新增的核心功能：**早晨把所有任务一次性发给 AI，它帮你分解成子任务并自动调度执行。**
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) —— 信任模型、状态、调度、校验与设计取舍
+- [`docs/RUNBOOK.md`](docs/RUNBOOK.md) —— 部署、运维、切换与回滚
+- [`docs/BROWSER-PROFILES.md`](docs/BROWSER-PROFILES.md) —— 浏览器路线与无人值守边界
+- [`docs/BUGFIX-LOG.md`](docs/BUGFIX-LOG.md) —— 缺陷、修复与守住它们的测试
 
-### 1. 准备任务文件
+## 路线图
 
-创建一个文本文件，每行一个任务，`#` 开头的行是注释：
+- 视觉路由：任务遇到截图时自动路由到带视觉能力的模型，而不是报错。
+- 真浏览器执行器：私有执行器接口后面挂 Playwright 受管会话。
+- 常驻 daemon 崩溃自愈（Windows 计划任务）。
+- 按能力选模型：分类用便宜模型，规划用强模型。
+- 飞书控制面收尾（应用密钥、worker 绑定），实现手机优先的使用方式。
 
-```text
-# 今天的任务
-写一篇关于 AI 在教育领域应用的博客文章
-整理上周的实验数据并生成图表
-查一下最近 Three.js 的更新日志
-给团队发一封周报邮件
-```
+## 许可证
 
-### 2. 配置 AI API
-
-在私有目录的 `config/runtime.json` 中填入你的 OpenAI 兼容 API：
-
-```json
-{
-  "planner": {
-    "apiEndpoint": "https://api.openai.com/v1/chat/completions",
-    "apiKey": "你的 API Key",
-    "model": "gpt-4o-mini"
-  },
-  "executor": {
-    "apiEndpoint": "https://api.openai.com/v1/chat/completions",
-    "apiKey": "你的 API Key",
-    "model": "gpt-4o-mini"
-  }
-}
-```
-
-没有配置 API 也能用 —— 任务会以 `unknown` 类型透传，不分解。
-
-### 3. 一键启动晨间工作流
-
-```powershell
-# 只规划和创建任务，不自动启动调度器
-npm run runtime -- morning C:\path\to\tasks.txt
-
-# 规划 + 创建 + 自动启动调度器
-npm run runtime -- morning C:\path\to\tasks.txt --enable
-```
-
-AI 会把每个任务分解成 1-4 个子任务，判断每个子任务的类型（`ai_call` / `desktop` / `browser`）和优先级，
-然后创建父子任务并打出计划概览。
-
-### 4. 批量导入（不经过 AI 规划）
-
-如果不需要 AI 分解，只想批量创建任务：
-
-```powershell
-npm run runtime -- batch C:\path\to\tasks.txt
-```
-
-### 任务类型说明
-
-| 类型 | 含义 | 谁来执行 |
-|---|---|---|
-| `ai_call` | 可由 AI 直接完成（写文案、做分析、查资料等） | AI 执行器 |
-| `desktop` | 需要操作桌面软件 | 需配置私有桌面执行器 |
-| `browser` | 需要浏览器操作 | 需配置私有浏览器执行器 |
-| `unknown` | 未分类 | 尝试用 AI 执行 |
-
-## 不要提交的东西
-
-真实 API Key、飞书 App Secret、网关 token、模型中转地址、Cookie、含真实 Windows 用户名的绝对路径、
-任务截图、个人研究材料、`data/` 下的任何运行数据。`npm run audit:privacy` 会在提交前拦一道，CI 里也会再跑一次。
-
-审计规则对"用户目录 + 真实用户名"这种形态是零容忍的，连文档里的示例都不放过 —— 这是故意的：
-上一版审计因为没有处理源码里的双反斜杠转义，真的漏掉过一个真实用户名。
+MIT，见 [`LICENSE`](LICENSE)。

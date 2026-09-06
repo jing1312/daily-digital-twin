@@ -4,7 +4,38 @@
 下表是"缺陷 → 修复位置 → 守住它的测试"的完整映射。编号 `B*` 同时出现在提交信息、
 代码注释和测试名里，方便日后顺着任一处反查。
 
-测试总数：**132**，全部通过（`npm test`）。
+测试总数：**387**，全部通过（`npm test`，2026-09-07 更新）。
+
+---
+
+## B29 父任务被调度器抢跑，先进 partial 终态导致收尾失效
+
+真闭环验证时发现：`morning` 创建的父任务 taskType=`unknown` 且 priority=5
+（高于子任务），调度器先抓父任务执行，ai-executor 如实返回 partial，
+父任务进入终态后 `finalizeParentTask`（task-store.mjs 的收尾入口）一看
+已是终态就直接返回，**永远不修正** —— 即使它全部子任务都 completed，
+父任务也永远带着「unknown 类型跳过」的错误摘要停在 partial。
+
+- 修复：`src/core/scheduler-loop.mjs` —— `tick()` 选候选时过滤掉有子任务的
+  容器任务；父任务只等子任务全部到终态后自动收尾。
+  `finalizeParentTask` 的严格语义不动（partial 不洗白成 completed）。
+- 测试：`test/scheduler-loop-v3.test.mjs`（父任务不被领取；子任务完成后
+  同一轮 tick 内父任务自动收尾为 completed）
+
+## B30 宿主继承的 ELECTRON_RUN_AS_NODE 让 Electron 应用启动即退
+
+从 WorkBuddy、VS Code 终端等 Electron 宿主启动的子进程都带
+`ELECTRON_RUN_AS_NODE=1`。私有执行器经 pwsh `Start-Process` 启动
+Code.exe 时，它被当成纯 Node 运行：静默退出码 0、不开窗口、不留进程，
+脚本如实报「应用启动后立即退出」，任务 failed。手动 `--verbose` 抓到
+Node 风格的 `bad option` 报错才定位到根因。
+
+- 修复：`platform/windows/DailyTwin.Common.ps1`（所有脚本共用的点号引入库）
+  统一移除 `ELECTRON_RUN_AS_NODE` / `ELECTRON_NO_ATTACH_CONSOLE`。
+- 验证：修复后真实任务 `打开 vscode` → completed，进程 + 窗口双证据
+  （PID 与窗口标题均为真机实测）。
+- 测试：环境变量清理属宿主行为，真机可复现；脚本的语法与编码由
+  `npm run lint:ps` 与 `Test-DailyTwinPlatform.ps1` 守住。
 
 ---
 
