@@ -436,6 +436,9 @@ export function renderPage(initialConfig, meta) {
     </div>
     <div class="row">
       <div><label>模型</label><input type="text" id="e-model"></div>
+      <div><label>视觉模型（可空；任务带图时自动启用）</label><input type="text" id="e-vmodel" placeholder="如 claude-opus-4-8"></div>
+    </div>
+    <div class="row">
       <div><label>推理力度</label>
         <select id="e-effort">
           <option value="">默认（不传）</option>
@@ -523,6 +526,7 @@ function get(id) { return document.getElementById(id).value.trim(); }
   put('e-endpoint', c.executor && c.executor.apiEndpoint);
   put('e-key', c.executor && c.executor.apiKey);
   put('e-model', c.executor && c.executor.model);
+  put('e-vmodel', c.executor && c.executor.visionModel);
   put('e-output', c.executor && c.executor.outputDir);
   put('e-timeout', c.executor && c.executor.timeoutMs);
   document.getElementById('s-enabled').value = c.scheduler && c.scheduler.enabled ? 'true' : 'false';
@@ -745,6 +749,7 @@ function collectPatch() {
     },
     executor: {
       apiEndpoint: get('e-endpoint'), apiKey: get('e-key'), model: get('e-model'),
+      visionModel: get('e-vmodel') || null,
       reasoningEffort: get('e-effort') || null,
       outputDir: get('e-output'), timeoutMs: Number(get('e-timeout'))
     },

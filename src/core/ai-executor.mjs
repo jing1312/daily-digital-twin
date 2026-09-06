@@ -41,7 +41,13 @@ const MAX_IMAGES_PER_TASK = 8;
 // 中文注释任务文本可能来自远端 planner（不受信任），绝不能让它指挥本机去读 home 之外的文件。
 // 中文注释限制：路径中含空格时无法识别（按空白分词），这是接受的取舍。
 export function extractImagePaths(requestText, home) {
-  const tokens = String(requestText ?? '').split(/[\s"'，。；！？、（）()【】<>]+/).filter(Boolean);
+  const text = String(requestText ?? '');
+  const tokens = text.split(/[\s"'，。；！？、（）()【】<>]+/).filter(Boolean);
+  // 中文注释：中文书写常把路径和后续字粘连（"a.png里的内容"），按空白分词会粘住；
+  // 中文注释补一条正则兜底：从原文里再抓一遍 ASCII 路径形状的图片引用。
+  for (const match of text.matchAll(/[A-Za-z0-9_.\-\\/]+\.(?:png|jpe?g|gif|webp|bmp)/gi)) {
+    tokens.push(match[0]);
+  }
   const seen = new Set();
   const found = [];
   for (const token of tokens) {
