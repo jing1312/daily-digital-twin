@@ -104,7 +104,7 @@ npm run runtime -- show 1
 ## 验证
 
 ```bash
-npm test              # 396 个单元测试
+npm test              # 402 个单元测试
 npm run audit:privacy # 密钥 / 私有路径不得进仓库
 npm run smoke         # CLI 冒烟
 npm run check         # 测试 + 审计 + 冒烟

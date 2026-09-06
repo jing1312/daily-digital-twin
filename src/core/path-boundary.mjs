@@ -16,6 +16,10 @@ export function resolveContainedPath(rootPath, candidatePath, { candidateMustBeA
   const candidateFlavor = pathFlavor(candidate);
   if (!rootFlavor || !candidate || (candidateMustBeAbsolute && !candidateFlavor)) return null;
   if (candidateFlavor && candidateFlavor.name !== rootFlavor.name) return null;
+  // 中文注释：posix 下反斜杠是普通字符 —— '..\..\secret.png' 会被 resolve 误判成
+  // 中文注释：home 内的一个普通文件名，越界路径摇身一变成为"内部路径"（CI B32 实测）。
+  // 中文注释：正常 Linux 路径不会出现反斜杠，凡 root 为 posix 而候选带反斜杠一律拒绝。
+  if (rootFlavor.name === 'posix' && candidate.includes('\\')) return null;
 
   const { api } = rootFlavor;
   const resolvedRoot = api.resolve(root);
