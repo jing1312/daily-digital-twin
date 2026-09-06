@@ -30,8 +30,10 @@
 **执行器**
 
 - `ai_call` —— 走 OpenAI 兼容接口，token 账本按任务记录（输入、缓存输入、输出、延迟、本地估价）。任务描述里引用了 `DAILY_TWIN_HOME` 内的图片文件时，执行器自动路由到视觉模型（`executor.visionModel`）并把图片作为多模态输入带上。
-- `desktop` / `browser` —— 从 `DAILY_TWIN_HOME` 里的私有执行器模块装载（例如 `executor/index.mjs`）。自带的私有执行器能打开已登记的应用（进程 + 窗口证据），并用 `playwright-core` 驱动受管 Edge 浏览器打开已登记网站或网址——回读真实 URL 与页面标题，截图落盘作为文件证据。没有私有执行器时，这些类型如实返回 `partial`。
+- `desktop` / `browser` —— 从 `DAILY_TWIN_HOME` 里的私有执行器模块装载（例如 `executor/index.mjs`）。自带的私有执行器能打开已登记的应用（进程 + 窗口证据），并用 `playwright-core` 驱动受管 Edge 浏览器打开已登记网站或网址——回读真实 URL 与页面标题，截图落盘作为文件证据。已登记网站还可以定义多步流程（`goto`/`fill`/`click`/`wait`/`verify`/`screenshot`，步骤值支持 `{{参数}}` 占位符，参数在任务文本里以 `参数=值` 提供）；任何一步失败都会如实报失败，带步骤号和现场截图。没有私有执行器时，这些类型如实返回 `partial`。
 - `unknown` —— 原样跳过，不瞎猜。
+
+**daemon 看门狗** —— `Start-DailyTwinWatchdog.ps1` 负责调度 daemon 的生死：以 `data/daemon.pid` 为准绳（PID 由 daemon 本体写入，命令行 / 配置页 / 看门狗三种拉起方式状态一致），进程崩了自动拉起，拉不起来按 15s→30s→60s… 指数退避持续重试、绝不弃疗；锁文件防双开；每次崩溃与恢复都追加到 `state\watchdog.log`。配合登录计划任务（`Install-DailyTwinStartup.ps1`）形成三层自愈：看门狗拉 daemon，计划任务拉看门狗，登录拉计划任务。
 
 **飞书控制面**（`serve`）—— WebSocket 网关，首次发消息的人绑定为唯一所有者，之后其他人一律拒绝；支持任务派发与控制命令（`status`、`pause`、`resume`、`cancel`、查证据），回执统一脱敏。
 
@@ -102,7 +104,7 @@ npm run runtime -- show 1
 ## 验证
 
 ```bash
-npm test              # 387 个单元测试
+npm test              # 396 个单元测试
 npm run audit:privacy # 密钥 / 私有路径不得进仓库
 npm run smoke         # CLI 冒烟
 npm run check         # 测试 + 审计 + 冒烟
@@ -119,8 +121,6 @@ Windows 额外跑 `npm run lint:ps` 和 `npm run selftest:ps`（PowerShell 解�
 
 ## 路线图
 
-- 已登记的多步浏览器流：在私有目录里定义填写/提交步骤，在证据门控之下执行。
-- 常驻 daemon 崩溃自愈（Windows 计划任务）。
 - 按能力选模型：分类用便宜模型，规划用强模型。
 - 飞书控制面收尾（应用密钥、worker 绑定），实现手机优先的使用方式。
 

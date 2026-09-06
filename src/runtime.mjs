@@ -1,4 +1,5 @@
 import { mkdir, writeFile, access, readFile } from 'node:fs/promises';
+import { unlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
@@ -146,8 +147,38 @@ async function manageOwner(home, action) {
 }
 
 // 中文注释：前台运行调度循环。未启用时明确拒绝并给出开启方法。
+// 中文注释：daemon 自己写 data/daemon.pid（纯数字），任何方式拉起（命令行/配置页/watchdog）
+// 中文注释：状态都一致；启动时发现活着的老 daemon 就拒绝双开（修：之前只有配置页知道 PID）。
 async function runDaemon(home) {
   const { store, config } = await openStore(home);
+  const daemonPidPath = join(home, 'data', 'daemon.pid');
+  await mkdir(join(home, 'data'), { recursive: true });
+  try {
+    const previous = Number.parseInt((await readFile(daemonPidPath, 'utf8')).trim(), 10);
+    if (Number.isSafeInteger(previous) && previous > 0 && previous !== process.pid) {
+      try {
+        process.kill(previous, 0);
+        store.close();
+        print({ started: false, reason: 'daemon_already_running', pid: previous, pidFile: 'data/daemon.pid' });
+        return;
+      } catch {
+        // 中文注释：旧 PID 已死，PID 文件是残留，继续启动并覆盖。
+      }
+    }
+  } catch {
+    // 中文注释：PID 文件不存在属正常首启。
+  }
+  await writeFile(daemonPidPath, `${process.pid}\n`, 'utf8');
+  // 中文注释：exit 事件里事件循环不再跑 await，必须用同步删除才可靠。
+  const removePidFile = () => {
+    try {
+      unlinkSync(daemonPidPath);
+    } catch {
+      // 中文注释：文件已被人删了就算了；退出路径上的清理不允许再抛。
+    }
+  };
+  process.on('exit', removePidFile);
+
   let daemonTelemetry = {};
 
   // 中文注释：公开仓不内置任何真实执行器 —— 执行器涉及本机软件路径，属于私有配置。
