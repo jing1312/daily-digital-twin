@@ -30,8 +30,10 @@ Three principles run through the whole codebase:
 **Executors**
 
 - `ai_call` — runs through an OpenAI-compatible endpoint, with per-task token ledger entries (input, cached input, output, latency, local cost estimate). When the request references image files inside `DAILY_TWIN_HOME`, the executor routes to a vision-capable model (`executor.visionModel`) and carries them as multimodal input.
-- `desktop` / `browser` — loaded from a private executor module in `DAILY_TWIN_HOME` (for example `executor/index.mjs`). The bundled private executor opens registered applications (process + window evidence) and drives a managed Edge browser via `playwright-core` for registered sites and URLs — verifying the real URL and page title, then saving a screenshot as file evidence. Without a private executor, these task types honestly return `partial`.
+- `desktop` / `browser` — loaded from a private executor module in `DAILY_TWIN_HOME` (for example `executor/index.mjs`). The bundled private executor opens registered applications (process + window evidence) and drives a managed Edge browser via `playwright-core` for registered sites and URLs — verifying the real URL and page title, then saving a screenshot as file evidence. Registered sites can also define multi-step flows (`goto`/`fill`/`click`/`wait`/`verify`/`screenshot`, with `{{param}}` placeholders supplied in the task text); every step failure is reported with its step number and a failure screenshot. Without a private executor, these task types honestly return `partial`.
 - `unknown` — passes through untouched rather than being guessed at.
+
+**Daemon watchdog** — `Start-DailyTwinWatchdog.ps1` keeps the scheduler daemon alive: it latches onto `data/daemon.pid` (written by the daemon itself, so every launch path — CLI, config UI, watchdog — reports the same state), relaunches on crash with exponential backoff (15 s doubling up to a cap, never giving up), refuses a second instance via a lock file, and appends every crash/recovery to `state/watchdog.log`. Layer it under a logon scheduled task (`Install-DailyTwinStartup.ps1`) and you get three tiers of self-healing: watchdog restarts the daemon, the scheduled task restarts the watchdog, logon restarts the task.
 
 **Feishu control plane** (`serve`) — a WebSocket gateway that binds the first sender as the owner, accepts task and control messages (`status`, `pause`, `resume`, `cancel`, evidence requests), and answers with redacted receipts.
 
@@ -102,7 +104,7 @@ Read [`docs/RUNBOOK.md`](docs/RUNBOOK.md) before enabling routine execution.
 ## Verification
 
 ```bash
-npm test              # 387 unit tests
+npm test              # 396 unit tests
 npm run audit:privacy # secrets / private paths must not enter the repo
 npm run smoke         # CLI smoke test
 npm run check         # tests + audit + smoke
@@ -119,8 +121,6 @@ Windows additionally runs `npm run lint:ps` and `npm run selftest:ps` (PowerShel
 
 ## Roadmap
 
-- Registered multi-step browser flows: fill/submit steps defined in the private catalog, executed behind the evidence gate.
-- Crash self-healing for long-running daemons via Windows scheduled tasks.
 - Per-capability model selection (cheap models for classification, stronger models for planning).
 - Finishing the Feishu control-plane rollout (app credentials, worker binding) for phone-first usage.
 

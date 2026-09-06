@@ -4,7 +4,7 @@
 下表是"缺陷 → 修复位置 → 守住它的测试"的完整映射。编号 `B*` 同时出现在提交信息、
 代码注释和测试名里，方便日后顺着任一处反查。
 
-测试总数：**387**，全部通过（`npm test`，2026-09-07 更新）。
+测试总数：**396**，全部通过（`npm test`，2026-09-07 更新）。
 
 ---
 
@@ -36,6 +36,23 @@ Node 风格的 `bad option` 报错才定位到根因。
   （PID 与窗口标题均为真机实测）。
 - 测试：环境变量清理属宿主行为，真机可复现；脚本的语法与编码由
   `npm run lint:ps` 与 `Test-DailyTwinPlatform.ps1` 守住。
+
+## B31 配置页启动的 daemon 从不写 PID 文件，状态永远是「未运行」
+
+`scripts/config-ui.mjs` 的 `startDaemon` 只 `spawn` 后立刻返回 `child.pid`，
+**从不写 `data/daemon.pid`**；而 `daemonStatus`/`stopDaemon` 都只认这个文件。
+结果：从仪表盘点「启动 daemon」，daemon 明明在跑，状态栏永远显示未运行、
+「停止」按钮报「PID 文件不存在」——启动与状态查询各说各话。PID 文件的
+唯一写入方根本不存在，这个契约从仪表盘上线起就是断的。
+
+- 修复：`src/runtime.mjs` —— daemon 本体启动时写 `data/daemon.pid`（纯数字），
+  退出时同步删除（`process.on('exit')` 内用 `unlinkSync`，异步删除在退出路径不可靠）；
+  启动前若发现 PID 文件指向活进程则拒绝双开（`daemon_already_running`）。
+  命令行、配置页、看门狗（`Start-DailyTwinWatchdog.ps1`）三种拉起方式从此
+  共享同一份状态。看门狗的崩溃检测也以该文件为准绳。
+- 验证：真机三轮 —— watchdog 拉起（PID 落盘）→ `Stop-Process` 强杀 →
+  watchdog 记录 `daemon-crashed` 并在 10 秒内拉起新实例（`daemon-started`）；
+  手动再启 daemon 输出 `daemon_already_running` 且不产生第二个进程。
 
 ---
 
