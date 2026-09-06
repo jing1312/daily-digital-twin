@@ -2,7 +2,6 @@
 // 中文注释：本地 Windows 也能直接验证 Linux 语义（B32：posix 下反斜杠被当普通文件名）。
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { join as win32Join } from 'node:path';
 import { resolveContainedPath } from '../src/core/path-boundary.mjs';
 
 describe('resolveContainedPath — posix root（Linux 语义）', () => {
@@ -28,7 +27,8 @@ describe('resolveContainedPath — win32 root（Windows 语义）', () => {
 
   test('盘符绝对路径越界拒绝、内部相对路径接受', () => {
     assert.equal(resolveContainedPath(winHome, 'C:\\Windows\\evil.png'), null);
-    assert.equal(resolveContainedPath(winHome, 'data\\shots\\a.png'), win32Join(winHome, 'data\\shots\\a.png'));
+    // 中文注释：win32 API 在任何平台都用反斜杠拼接，期望值直接写字面量，不依赖 node:path 的平台行为。
+    assert.equal(resolveContainedPath(winHome, 'data\\shots\\a.png'), 'D:\\DailyTwin\\home\\data\\shots\\a.png');
     assert.equal(resolveContainedPath(winHome, '..\\escape.png'), null);
   });
 });
