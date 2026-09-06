@@ -78,6 +78,8 @@ export const DEFAULT_CONFIG = {
     apiEndpoint: null,
     apiKey: null,
     model: 'gpt-4o-mini',
+    // 中文注释：视觉模型。任务引用私有目录内图片时自动改用；null 则回落到 model。
+    visionModel: null,
     outputDir: 'data/outputs',
     timeoutMs: 60000
   },
@@ -285,6 +287,11 @@ export function validateConfig(config) {
     }
     if (typeof config.executor.model !== 'string' || config.executor.model.trim().length === 0) {
       problems.push('executor.model 必须是非空字符串');
+    }
+    // 中文注释：视觉模型可选 —— null 表示回落到主模型。
+    if (config.executor.visionModel !== null
+      && (typeof config.executor.visionModel !== 'string' || config.executor.visionModel.trim().length === 0)) {
+      problems.push('executor.visionModel 必须是非空字符串或 null');
     }
     checkReasoningEffort('executor.reasoningEffort', config.executor.reasoningEffort);
   }

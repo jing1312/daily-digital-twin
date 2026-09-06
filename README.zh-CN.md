@@ -29,7 +29,7 @@
 
 **执行器**
 
-- `ai_call` —— 走 OpenAI 兼容接口，token 账本按任务记录（输入、缓存输入、输出、延迟、本地估价）。
+- `ai_call` —— 走 OpenAI 兼容接口，token 账本按任务记录（输入、缓存输入、输出、延迟、本地估价）。任务描述里引用了 `DAILY_TWIN_HOME` 内的图片文件时，执行器自动路由到视觉模型（`executor.visionModel`）并把图片作为多模态输入带上。
 - `desktop` / `browser` —— 从 `DAILY_TWIN_HOME` 里的私有执行器模块装载（例如 `executor/index.mjs`）。自带的私有执行器能打开已登记的应用、网站和网址，并上报进程与窗口证据；没有私有执行器时，这些类型如实返回 `partial`。
 - `unknown` —— 原样跳过，不瞎猜。
 
@@ -119,7 +119,6 @@ Windows 额外跑 `npm run lint:ps` 和 `npm run selftest:ps`（PowerShell 解�
 
 ## 路线图
 
-- 视觉路由：任务遇到截图时自动路由到带视觉能力的模型，而不是报错。
 - 真浏览器执行器：私有执行器接口后面挂 Playwright 受管会话。
 - 常驻 daemon 崩溃自愈（Windows 计划任务）。
 - 按能力选模型：分类用便宜模型，规划用强模型。
