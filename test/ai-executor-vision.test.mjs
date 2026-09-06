@@ -53,6 +53,15 @@ describe('extractImagePaths — 图片路径提取', () => {
       assert.equal(found[0].mime, 'image/webp');
     });
   });
+
+  test('中文粘连写法（a.png里的内容）也能提取', async () => {
+    await withTempHome(async (home) => {
+      mkdirSync(join(home, 'data', 'shots'), { recursive: true });
+      const found = extractImagePaths('描述data/shots/b.png里的主要内容', home);
+      assert.equal(found.length, 1);
+      assert.equal(found[0].path, join(home, 'data', 'shots', 'b.png'));
+    });
+  });
 });
 
 describe('ai-executor — 视觉路由', () => {
