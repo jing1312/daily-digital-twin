@@ -6,8 +6,10 @@
 
 import { createServer } from 'node:http';
 import { readFile, writeFile, mkdir, access } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
+import { fileURLToPath } from 'node:url';
+import { spawn, spawnSync } from 'node:child_process';
 import { HOME_ENV, HomeResolutionError, resolveHome } from '../src/core/home.mjs';
 import {
   DEFAULT_CONFIG,
@@ -15,10 +17,15 @@ import {
   ConfigError,
   loadConfig,
   mergeConfig,
+  storeOptionsFromConfig,
   validateConfig
 } from '../src/core/config.mjs';
+import { TaskStore } from '../src/core/task-store.mjs';
 
 const DEFAULT_PORT = 18791;
+
+// 中文注释：仓库根目录（scripts/..）。daemon 启动要用仓库里的 src/runtime.mjs。
+const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
 // 中文注释：推理力度档位。null/空 = 不给 API 传 reasoning_effort 参数。
 export const REASONING_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh'];
@@ -181,6 +188,117 @@ export function normalizePatch(patch) {
   return cleaned;
 }
 
+// ---------- 仪表盘（任务列表 / 历史 / 成本 / daemon 启停） ----------
+
+const DAEMON_PID_FILE = 'data/daemon.pid';
+
+export function daemonPidPath(home) {
+  return join(home, DAEMON_PID_FILE.replaceAll('\\', '/'));
+}
+
+function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === 'EPERM';
+  }
+}
+
+async function readDaemonPid(home) {
+  try {
+    const text = (await readFile(daemonPidPath(home), 'utf8')).trim();
+    const pid = Number.parseInt(text, 10);
+    return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function daemonStatus(home) {
+  const pid = await readDaemonPid(home);
+  if (pid === null || !isProcessAlive(pid)) return { running: false, pid: null };
+  return { running: true, pid };
+}
+
+export function startDaemon({ home, nodePath = process.execPath }) {
+  const runtimePath = join(REPO_ROOT, 'src', 'runtime.mjs');
+  const child = spawn(nodePath, [runtimePath, 'daemon'], {
+    cwd: REPO_ROOT,
+    env: { ...process.env, DAILY_TWIN_HOME: home },
+    detached: true,
+    stdio: 'ignore'
+  });
+  child.unref();
+  return { ok: true, pid: child.pid };
+}
+
+export async function stopDaemon(home) {
+  const pid = await readDaemonPid(home);
+  if (pid === null) return { ok: false, code: 'not_running', error: 'PID 文件不存在，仪表盘启动过的 daemon 才能这样停。' };
+  if (process.platform === 'win32') {
+    // 中文注释：/T 连带子进程，/F 强制。detached 进程不是当前进程的子节点，必须用 taskkill。
+    const result = spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' });
+    if (result.status !== 0 && isProcessAlive(pid)) {
+      return { ok: false, code: 'stop_failed', error: `taskkill 退出码 ${result.status}，进程 ${pid} 可能还在` };
+    }
+  } else {
+    try { process.kill(pid); } catch { /* 进程已不存在，视为已停止 */ }
+  }
+  await rmSilent(daemonPidPath(home));
+  return { ok: true, pid };
+}
+
+async function rmSilent(path) {
+  try { await import('node:fs/promises').then((fs) => fs.rm(path, { force: true })); } catch { /* 忽略 */ }
+}
+
+// 中文注释：把任务行裁成仪表盘需要的字段，长文本截断，不向前端泄整段请求内容。
+function slimTask(task, maxText = 80) {
+  const clip = (text) => {
+    const value = String(text ?? '');
+    return value.length > maxText ? `${value.slice(0, maxText)}…` : value;
+  };
+  return {
+    id: task.id,
+    publicId: task.publicId ?? null,
+    state: task.state,
+    taskType: task.taskType ?? 'unknown',
+    priority: task.priority ?? 0,
+    parentTaskId: task.parentTaskId ?? null,
+    request: clip(task.request),
+    summary: clip(task.summary),
+    updatedAt: task.updatedAt
+  };
+}
+
+// 中文注释：每次请求单独开一个 store 连接再关闭：daemon 可能同时持库，
+// 中文注释 WAL + busyTimeout 允许多连接读，谁也不挡谁。
+export async function withStore(home, work) {
+  const { config } = await loadConfig(home);
+  const dbPath = join(home, String(config.database).replaceAll('\\', '/'));
+  await mkdir(dirname(dbPath), { recursive: true });
+  const store = new TaskStore(dbPath, storeOptionsFromConfig(config));
+  try {
+    return work(store);
+  } finally {
+    store.close();
+  }
+}
+
+export async function dashboardPayload(home) {
+  const [{ config }, daemon] = await Promise.all([
+    loadConfig(home),
+    daemonStatus(home)
+  ]);
+  return withStore(home, (store) => ({
+    daemon: { ...daemon, schedulerEnabled: config.scheduler?.enabled === true },
+    openTasks: store.listOpenTasks().map((task) => slimTask(task)),
+    history: store.listCompletedTasks(10).map((task) => slimTask(task)),
+    cost: store.totalTokenUsage()
+  }));
+}
+
 // 中文注释：页面模板。值通过 INITIAL 注入，全部用 .value 赋值，不拼 HTML，天然免注入。
 export function renderPage(initialConfig, meta) {
   const safeJson = JSON.stringify({ config: initialConfig, meta }).replaceAll('<', '\\u003c');
@@ -212,6 +330,18 @@ export function renderPage(initialConfig, meta) {
   .keyline { display: flex; gap: 8px; align-items: center; }
   .keyline input { flex: 1; }
   .keyline label { margin: 0; white-space: nowrap; display: flex; align-items: center; gap: 4px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
+  th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid #e4eaf0; vertical-align: top; }
+  th { color: #5b6b7b; font-weight: 600; white-space: nowrap; }
+  td.mono { white-space: nowrap; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; background: #b6c2cd; }
+  .dot.on { background: #22a05a; }
+  .st { font-size: 12px; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+  .st-completed { background: #e6f7ec; color: #116a35; }
+  .st-running, .st-queued, .st-retrying { background: #e8f1fc; color: #1668dc; }
+  .st-partial, .st-failed { background: #fdecec; color: #a12626; }
+  .st-cancelled, .st-paused, .st-waiting_for_user { background: #f2f4f7; color: #5b6b7b; }
+  .dashbtns button { margin-top: 0; }
   #result { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); max-width: 680px; width: calc(100% - 32px);
             padding: 12px 16px; border-radius: 9px; font-size: 13px; display: none; box-shadow: 0 6px 24px rgba(0,0,0,.18); white-space: pre-wrap; }
   .ok { background: #e6f7ec; border: 1px solid #9fdcb6; color: #116a35; }
@@ -234,6 +364,27 @@ export function renderPage(initialConfig, meta) {
   <p class="meta" id="home-meta"></p>
   <div id="home-warning" style="display:none;background:#fff7e0;border:1px solid #e8cf8a;border-radius:9px;padding:10px 14px;font-size:13px;margin-bottom:14px;"></div>
   <div id="file-problems" style="display:none;background:#fdecec;border:1px solid #f3b6b6;border-radius:9px;padding:10px 14px;font-size:13px;margin-bottom:14px;white-space:pre-wrap;"></div>
+
+  <section>
+    <h2>仪表盘</h2>
+    <div class="dashbtns">
+      <p style="margin:4px 0;"><span class="dot" id="d-dot"></span><span id="d-status">daemon 状态未知</span>
+        <button class="ghost" onclick="startDaemon()">启动 daemon</button>
+        <button class="ghost" onclick="stopDaemon()">停止 daemon</button>
+        <button class="ghost" onclick="refreshDashboard(true)">刷新</button>
+      </p>
+    </div>
+    <p class="hint">这里启动/停止的是调度循环（等效命令行 runtime daemon）；配置改完需要重启 daemon 才生效。</p>
+
+    <h2 style="margin-top:14px;">未结束任务</h2>
+    <div id="d-open"></div>
+
+    <h2 style="margin-top:14px;">最近已结束任务</h2>
+    <div id="d-history"></div>
+
+    <h2 style="margin-top:14px;">Token 用量</h2>
+    <div id="d-cost" class="meta">——</div>
+  </section>
 
   <section>
     <h2>AI 规划器（morning 命令的任务分解）</h2>
@@ -316,8 +467,8 @@ export function renderPage(initialConfig, meta) {
   <section>
     <h2>任务并发与资源档位</h2>
     <div class="row">
-      <div><label>最大并行槽 maxSlots（1~4）</label><input type="number" id="b-slots"></div>
-      <div><label>未结束任务上限 openTaskLimit（1~4）</label><input type="number" id="b-open"></div>
+      <div><label>最大并行槽 maxSlots（1~8）</label><input type="number" id="b-slots"></div>
+      <div><label>未结束任务上限 openTaskLimit（1~64）</label><input type="number" id="b-open"></div>
       <div><label>数据库忙超时（毫秒）</label><input type="number" id="b-busy"></div>
     </div>
     <div class="row">
@@ -384,6 +535,108 @@ function toggleKey(id, box) {
   document.getElementById(id).type = box.checked ? 'text' : 'password';
 }
 
+// ---------- 仪表盘 ----------
+
+function stClass(state) { return 'st st-' + String(state || 'unknown'); }
+
+function renderTaskTable(containerId, rows, emptyText) {
+  const container = document.getElementById(containerId);
+  container.textContent = '';
+  if (!rows || rows.length === 0) {
+    const p = document.createElement('p');
+    p.className = 'hint';
+    p.textContent = emptyText;
+    container.appendChild(p);
+    return;
+  }
+  const table = document.createElement('table');
+  const thead = document.createElement('thead');
+  const headRow = document.createElement('tr');
+  for (const label of ['#', '状态', '类型', '内容', '更新时间']) {
+    const th = document.createElement('th');
+    th.textContent = label;
+    headRow.appendChild(th);
+  }
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+  const tbody = document.createElement('tbody');
+  for (const task of rows) {
+    const tr = document.createElement('tr');
+    const tdId = document.createElement('td');
+    tdId.className = 'mono';
+    tdId.textContent = (task.publicId ? task.publicId + ' / ' : '') + task.id;
+    tr.appendChild(tdId);
+    const tdState = document.createElement('td');
+    const span = document.createElement('span');
+    span.className = stClass(task.state);
+    span.textContent = task.state;
+    tdState.appendChild(span);
+    tr.appendChild(tdState);
+    const tdType = document.createElement('td');
+    tdType.textContent = task.taskType;
+    tr.appendChild(tdType);
+    const tdText = document.createElement('td');
+    tdText.textContent = task.request + (task.summary && task.state !== 'running' && task.state !== 'queued' ? ' → ' + task.summary : '');
+    tr.appendChild(tdText);
+    const tdTime = document.createElement('td');
+    tdTime.className = 'mono';
+    tdTime.textContent = task.updatedAt ? new Date(task.updatedAt).toLocaleString() : '';
+    tr.appendChild(tdTime);
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  container.appendChild(table);
+}
+
+function renderDashboard(data) {
+  const dot = document.getElementById('d-dot');
+  const status = document.getElementById('d-status');
+  if (data.daemon && data.daemon.running) {
+    dot.className = 'dot on';
+    status.textContent = 'daemon 运行中（PID ' + data.daemon.pid + '）· 调度器' + (data.daemon.schedulerEnabled ? '已启用' : '休眠');
+  } else {
+    dot.className = 'dot';
+    status.textContent = 'daemon 未运行 · 调度器' + (data.daemon && data.daemon.schedulerEnabled ? '已启用' : '休眠');
+  }
+  renderTaskTable('d-open', data.openTasks, '没有未结束的任务。');
+  renderTaskTable('d-history', data.history, '还没有已结束的任务。');
+  const cost = data.cost || {};
+  document.getElementById('d-cost').textContent =
+    'AI 调用 ' + (cost.calls || 0) + ' 次 · 输入 ' + (cost.inputTokens || 0) +
+    '（缓存命中 ' + (cost.cachedTokens || 0) + '）· 输出 ' + (cost.outputTokens || 0) +
+    ' tokens' + (cost.estimatedCost === null || cost.estimatedCost === undefined ? '' : ' · 估算成本 ¥' + Number(cost.estimatedCost).toFixed(4));
+}
+
+async function refreshDashboard(loud) {
+  try {
+    const res = await fetch('/api/dashboard');
+    const data = await res.json();
+    renderDashboard(data);
+    if (loud) show(resultBox, true, '仪表盘已刷新。');
+  } catch (error) {
+    if (loud) show(resultBox, false, '仪表盘加载失败：' + error.message);
+  }
+}
+
+async function daemonControl(action) {
+  try {
+    const res = await fetch('/api/daemon/' + action, { method: 'POST' });
+    const data = await res.json();
+    if (data.ok) show(resultBox, true, action === 'start' ? 'daemon 已启动（PID ' + data.pid + '）。' : 'daemon 已停止。');
+    else show(resultBox, false, (action === 'start' ? '启动失败' : '停止失败') + '[' + (data.code || '') + ']：' + (data.error || '未知错误'));
+  } catch (error) {
+    show(resultBox, false, '请求失败：' + error.message);
+  }
+  refreshDashboard(false);
+}
+
+function startDaemon() { return daemonControl('start'); }
+function stopDaemon() { return daemonControl('stop'); }
+
+// 中文注释：每 10 秒静默刷新一次仪表盘；后台失败不打扰用户。
+setInterval(() => refreshDashboard(false), 10000);
+refreshDashboard(false);
+
 // 中文注释：底部提示条。显式取元素，不依赖"元素 id 变全局变量"的非标准行为。
 const resultBox = document.getElementById('result');
 
@@ -398,7 +651,25 @@ function hintEndpoint(prefix) {
   hint.textContent = '将保存为：' + text;
 }
 
-// 中文注释：拉取服务商模型列表，填进下拉候选；输入框仍可手输。
+// 中文注释：把选中的模型直接写进配置文件（只动 model 字段，其他表单值不掺和）。
+async function persistModel(section, modelId) {
+  const patch = section === 'planner' ? { planner: { model: modelId } } : { executor: { model: modelId } };
+  try {
+    const res = await fetch('/api/save', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ patch })
+    });
+    const data = await res.json();
+    if (data.ok) show(resultBox, true, '模型已落库：' + modelId);
+    else show(resultBox, false, '模型落库失败：' + (data.problems ? data.problems.join('; ') : (data.fatal || data.error || '未知错误')));
+  } catch (error) {
+    show(resultBox, false, '模型落库失败：' + error.message);
+  }
+}
+
+// 中文注释：拉取服务商模型列表，填进下拉候选；点击胶囊直接选用并落库。
+// 中文注释：主配置默认模型跟首次拉取走 —— 当前模型为空、或不在服务商列表里时，
+// 中文注释自动选第一个并立即写盘，避免默认 gpt-4o-mini 在中转站根本不存在。
 async function loadModels(section) {
   const prefix = section === 'planner' ? 'p' : 'e';
   const body = { apiEndpoint: get(prefix + '-endpoint'), apiKey: get(prefix + '-key') };
@@ -422,10 +693,25 @@ async function loadModels(section) {
         const all = chips.querySelectorAll('.chip');
         for (const other of all) other.classList.remove('chip-active');
         chip.classList.add('chip-active');
+        persistModel(section, id);
       };
       chips.appendChild(chip);
     }
-    show(resultBox, true, '拉到 ' + data.models.length + ' 个模型，点下面的胶囊直接选用。');
+    const current = get(prefix + '-model');
+    if (!current || data.models.indexOf(current) === -1) {
+      const picked = data.models[0];
+      document.getElementById(prefix + '-model').value = picked;
+      chips.querySelector('.chip').classList.add('chip-active');
+      await persistModel(section, picked);
+      show(resultBox, true, '拉到 ' + data.models.length + ' 个模型；原模型' +
+        (current ? '不在服务商列表，已' : '为空，已') + '自动换成 ' + picked + ' 并落库。点胶囊可换。');
+    } else {
+      const active = chips.querySelectorAll('.chip');
+      for (const chip of active) {
+        if (chip.textContent === current) chip.classList.add('chip-active');
+      }
+      show(resultBox, true, '拉到 ' + data.models.length + ' 个模型，点胶囊直接选用（点击即落库）。');
+    }
   } catch (error) {
     show(resultBox, false, '拉取失败：' + error.message);
   }
@@ -587,6 +873,30 @@ export function startServer({ home, port = DEFAULT_PORT, host = '127.0.0.1', hom
       if (req.method === 'POST' && url.pathname === '/api/test') {
         const body = JSON.parse(await readBody(req));
         send(res, 200, await testChatEndpoint(body ?? {}));
+        return;
+      }
+
+      // 中文注释：仪表盘：任务列表 / 历史 / 成本 / daemon 状态，一次拉全。
+      if (req.method === 'GET' && url.pathname === '/api/dashboard') {
+        send(res, 200, await dashboardPayload(home));
+        return;
+      }
+
+      if (req.method === 'POST' && url.pathname === '/api/daemon/start') {
+        const status = await daemonStatus(home);
+        if (status.running) {
+          send(res, 200, { ok: false, code: 'already_running', error: `daemon 已在运行（PID ${status.pid}）` });
+          return;
+        }
+        const outcome = startDaemon({ home });
+        await mkdir(dirname(daemonPidPath(home)), { recursive: true });
+        await writeFile(daemonPidPath(home), `${outcome.pid}\n`, 'utf8');
+        send(res, 200, { ok: true, pid: outcome.pid });
+        return;
+      }
+
+      if (req.method === 'POST' && url.pathname === '/api/daemon/stop') {
+        send(res, 200, await stopDaemon(home));
         return;
       }
 

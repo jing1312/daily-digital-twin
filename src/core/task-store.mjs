@@ -279,6 +279,14 @@ export class TaskStore {
     `).all(Math.max(1, Number(limit) || 20)).map(mapTask);
   }
 
+  // 中文注释：列出所有未结束任务（配置网页仪表盘用）：排队/运行/重试/暂停/等待用户等。
+  listOpenTasks() {
+    return this.db.prepare(`
+      SELECT * FROM tasks WHERE state NOT IN ('completed', 'partial', 'failed', 'cancelled')
+      ORDER BY id ASC
+    `).all().map(mapTask);
+  }
+
   // 中文注释：F4：获取单个任务的完整详情，含事件、执行证据和 token 用量。
   getTaskDetail(taskId) {
     const task = this.getTask(taskId);

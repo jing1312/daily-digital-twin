@@ -162,8 +162,11 @@ function checkPrivateRelativePath(problems, path, value) {
 // 中文注释：校验后再交给策略模块，避免把 "4" 这类字符串当成数字用。
 export function validateConfig(config) {
   const problems = [];
-  checkIntegerInRange(problems, 'maxSlots', config.maxSlots, 1, 4);
-  checkIntegerInRange(problems, 'openTaskLimit', config.openTaskLimit, 1, 4);
+  // 中文注释：maxSlots / maxParallelWorkers 放宽到 8 —— 实际并发仍由内存档位决定
+  // 中文注释（resource-policy 的 1/2/4 档），这里只是解开配置层的人为上限。
+  // 中文注释：openTaskLimit 是"未结束任务队列深度"，不是并发数，放宽到 64。
+  checkIntegerInRange(problems, 'maxSlots', config.maxSlots, 1, 8);
+  checkIntegerInRange(problems, 'openTaskLimit', config.openTaskLimit, 1, 64);
   checkPositiveInteger(problems, 'busyTimeoutMs', config.busyTimeoutMs);
   checkPrivateRelativePath(problems, 'database', config.database);
 
@@ -184,7 +187,7 @@ export function validateConfig(config) {
   checkPositiveInteger(problems, 'verification.ttlSeconds', config.verification?.ttlSeconds);
   checkBoolean(problems, 'scheduler.enabled', config.scheduler?.enabled);
   checkPositiveInteger(problems, 'scheduler.pollSeconds', config.scheduler?.pollSeconds);
-  checkIntegerInRange(problems, 'scheduler.maxParallelWorkers', config.scheduler?.maxParallelWorkers, 1, 4);
+  checkIntegerInRange(problems, 'scheduler.maxParallelWorkers', config.scheduler?.maxParallelWorkers, 1, 8);
   checkIntegerInRange(problems, 'scheduler.maxForegroundTasks', config.scheduler?.maxForegroundTasks, 1, 1);
   checkBoolean(problems, 'execution.requireEvidence', config.execution?.requireEvidence);
   checkPositiveInteger(problems, 'execution.workerMaxMinutes', config.execution?.workerMaxMinutes);

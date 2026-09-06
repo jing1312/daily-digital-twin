@@ -146,17 +146,28 @@ test('Multica worker agent 必须唯一且最多四个，允许目录必须留�
   );
 });
 
-test('配置不能突破四任务上限或把电池模式放宽到多个重型槽', () => {
+test('配置不能突破上限或把电池模式放宽到多个重型槽', () => {
   for (const override of [
-    { maxSlots: 5 },
-    { openTaskLimit: 5 },
-    { scheduler: { maxParallelWorkers: 5 } },
+    { maxSlots: 9 },
+    { openTaskLimit: 65 },
+    { scheduler: { maxParallelWorkers: 9 } },
     { scheduler: { maxForegroundTasks: 2 } },
     { resource: { batterySlotLimit: 2 } }
   ]) {
     assert.throws(
       () => validateConfig(mergeConfig(DEFAULT_CONFIG, override)),
       ConfigError,
+      JSON.stringify(override)
+    );
+  }
+  // 中文注释：上限已放宽（队列深度 64、槽位 8），合法值不能再被误杀。
+  for (const override of [
+    { maxSlots: 8 },
+    { openTaskLimit: 64 },
+    { scheduler: { maxParallelWorkers: 8 } }
+  ]) {
+    assert.doesNotThrow(
+      () => validateConfig(mergeConfig(DEFAULT_CONFIG, override)),
       JSON.stringify(override)
     );
   }
