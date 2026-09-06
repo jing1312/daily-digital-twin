@@ -4,20 +4,71 @@
 // 中文注释：零依赖：用 Node 18+ 内置的 fetch。
 
 import { join } from 'node:path';
-import { writeFile, mkdir } from 'node:fs/promises';
+import { writeFile, mkdir, readFile, stat } from 'node:fs/promises';
+import { resolveContainedPath } from './path-boundary.mjs';
 
 export const DEFAULT_EXECUTOR_CONFIG = {
   apiEndpoint: null,
   apiKey: null,
   model: 'gpt-4o-mini',
+  // 中文注释：视觉模型。任务引用私有目录内的图片文件时，自动改用该模型并携带图片。
+  // 中文注释：为空则回落到主模型（部分服务商同一模型同时支持文本与视觉）。
+  visionModel: null,
   // 中文注释：系统提示词：告诉 AI 它是一个任务执行者。
   systemPrompt: `你是一个任务执行者。用户会给你一个具体的任务描述，你需要尽可能好地完成它。
 直接输出你的工作结果，不要输出多余的解释。`,
   // 中文注释：执行结果保存目录（相对于私有 home）。
   outputDir: 'data/outputs',
   // 中文注释：API 调用超时（毫秒）。
-  timeoutMs: 60000
+  timeoutMs: 60000,
+  // 中文注释：单次任务最多携带的图片数量，防止 payload 失控。
+  maxImages: 8
 };
+
+const IMAGE_EXTENSIONS = [
+  ['.png', 'image/png'],
+  ['.jpg', 'image/jpeg'],
+  ['.jpeg', 'image/jpeg'],
+  ['.gif', 'image/gif'],
+  ['.webp', 'image/webp'],
+  ['.bmp', 'image/bmp']
+];
+
+const MAX_IMAGES_PER_TASK = 8;
+
+// 中文注释：任务描述里引用的图片路径提取器。
+// 中文注释：只认私有目录（home）内的图片 —— 越界路径直接丢弃，这是"私密外置"原则的延伸：
+// 中文注释任务文本可能来自远端 planner（不受信任），绝不能让它指挥本机去读 home 之外的文件。
+// 中文注释限制：路径中含空格时无法识别（按空白分词），这是接受的取舍。
+export function extractImagePaths(requestText, home) {
+  const tokens = String(requestText ?? '').split(/[\s"'，。；！？、（）()【】<>]+/).filter(Boolean);
+  const seen = new Set();
+  const found = [];
+  for (const token of tokens) {
+    const lower = token.toLowerCase();
+    const ext = IMAGE_EXTENSIONS.find(([suffix]) => lower.endsWith(suffix));
+    if (!ext) continue;
+    // 中文注释：解析并强制限制在私有目录内；越界（../、别的盘符、UNC）返回 null。
+    const resolved = resolveContainedPath(home, token);
+    if (!resolved || seen.has(resolved)) continue;
+    seen.add(resolved);
+    found.push({ path: resolved, mime: ext[1] });
+    if (found.length >= MAX_IMAGES_PER_TASK) break; // 中文注释：硬上限，防止异常长文本。
+  }
+  return found;
+}
+
+// 中文注释：读图片并转 base64 data URI；文件不存在或读取失败返回 null（调用方跳过）。
+async function readImageAsDataUri(image) {
+  try {
+    const info = await stat(image.path);
+    if (!info.isFile()) return null;
+    const buf = await readFile(image.path);
+    return `data:${image.mime};base64,${buf.toString('base64')}`;
+  } catch {
+    return null;
+  }
+}
 
 export class ExecutorError extends Error {
   constructor(message, code = 'executor_error') {
@@ -109,25 +160,44 @@ export async function createAIExecutor({ home = null, config = {} } = {}) {
     }
 
     try {
+      // 中文注释：视觉路由 —— 任务引用了私有目录内的图片时，改走多模态消息并换用视觉模型。
+      const images = home ? extractImagePaths(task.request, home) : [];
+      const dataUris = [];
+      for (const image of images) {
+        const uri = await readImageAsDataUri(image);
+        if (uri) dataUris.push(uri);
+      }
+      const routedToVision = dataUris.length > 0;
+      const usedModel = routedToVision
+        ? (executorConfig.visionModel || executorConfig.model)
+        : executorConfig.model;
+
+      const userContent = routedToVision
+        ? [
+            { type: 'text', text: task.request },
+            ...dataUris.map((url) => ({ type: 'image_url', image_url: { url } }))
+          ]
+        : task.request;
+
       const { content, usage } = await callAI({
         apiEndpoint: executorConfig.apiEndpoint,
         apiKey: executorConfig.apiKey,
-        model: executorConfig.model,
+        model: usedModel,
         timeoutMs: executorConfig.timeoutMs,
         reasoningEffort: executorConfig.reasoningEffort ?? null,
         messages: [
           { role: 'system', content: executorConfig.systemPrompt },
-          { role: 'user', content: task.request }
+          { role: 'user', content: userContent }
         ]
       });
 
-      // 中文注释：记录 token 用量到账本。
+      // 中文注释：记录 token 用量到账本，模型记实际使用的那个。
       if (usage && store) {
         try {
           store.recordTokenUsage({
             taskId: task.id,
             workerId: 'ai-executor',
-            model: executorConfig.model,
+            model: usedModel,
             inputTokens: usage.prompt_tokens ?? 0,
             outputTokens: usage.completion_tokens ?? 0,
             cachedTokens: usage.prompt_tokens_details?.cached_tokens ?? 0,
@@ -151,9 +221,13 @@ export async function createAIExecutor({ home = null, config = {} } = {}) {
         }
       }
 
+      // 中文注释：诚实标注 —— 引用了图片但部分没读到的，必须让用户知道模型没看到全部。
+      const skipped = images.length - dataUris.length;
+      const note = skipped > 0 ? `（注意：${skipped} 个引用图片无法读取或越界，已跳过）` : '';
+
       return {
         outcome: evidence.length > 0 ? 'completed' : 'partial',
-        summary: content.slice(0, 200),
+        summary: content.slice(0, 200) + note,
         reason: evidence.length > 0 ? null : 'AI 执行成功但未能保存输出文件，缺少文件证据',
         evidence
       };

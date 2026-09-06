@@ -29,7 +29,7 @@ Three principles run through the whole codebase:
 
 **Executors**
 
-- `ai_call` — runs through an OpenAI-compatible endpoint, with per-task token ledger entries (input, cached input, output, latency, local cost estimate).
+- `ai_call` — runs through an OpenAI-compatible endpoint, with per-task token ledger entries (input, cached input, output, latency, local cost estimate). When the request references image files inside `DAILY_TWIN_HOME`, the executor routes to a vision-capable model (`executor.visionModel`) and carries them as multimodal input.
 - `desktop` / `browser` — loaded from a private executor module in `DAILY_TWIN_HOME` (for example `executor/index.mjs`). The bundled private executor opens registered applications, sites, and URLs and reports process and window evidence. Without one, these task types honestly return `partial`.
 - `unknown` — passes through untouched rather than being guessed at.
 
@@ -119,7 +119,6 @@ Windows additionally runs `npm run lint:ps` and `npm run selftest:ps` (PowerShel
 
 ## Roadmap
 
-- Vision routing: route screenshot-dependent steps to a vision-capable model instead of failing.
 - Real browser executor: managed Playwright sessions behind the private executor interface.
 - Crash self-healing for long-running daemons via Windows scheduled tasks.
 - Per-capability model selection (cheap models for classification, stronger models for planning).
