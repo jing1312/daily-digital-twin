@@ -4,7 +4,7 @@
 下表是"缺陷 → 修复位置 → 守住它的测试"的完整映射。编号 `B*` 同时出现在提交信息、
 代码注释和测试名里，方便日后顺着任一处反查。
 
-测试总数：**396**，全部通过（`npm test`，2026-09-07 更新）。
+测试总数：**402**，全部通过（`npm test`，2026-09-07 更新）。
 
 ---
 
@@ -53,6 +53,27 @@ Node 风格的 `bad option` 报错才定位到根因。
 - 验证：真机三轮 —— watchdog 拉起（PID 落盘）→ `Stop-Process` 强杀 →
   watchdog 记录 `daemon-crashed` 并在 10 秒内拉起新实例（`daemon-started`）；
   手动再启 daemon 输出 `daemon_already_running` 且不产生第二个进程。
+
+## B32 越界路径在 Linux 上被误判为 home 内文件（CI 挂、本机过）
+
+视觉路由的"越界路径一律丢弃"测试在 Windows 本机 396 全绿，Linux CI 却报
+`2 !== 0`。根因是两个平台语义叠加：
+
+1. `extractImagePaths` 的中文粘连兜底正则（`[A-Za-z0-9_.\-\\/]+\.png`）里
+   **没有冒号**，`C:\Windows\system32\evil.png` 被抓成相对形状的
+   `system32\evil.png`；
+2. `resolveContainedPath` 对 flavor 为 null 的相对候选沿用 root 的 API 解析。
+   Windows 上 win32 语义正确上跳越界 → 拒绝；Linux 上 posix 语义把反斜杠
+   当**普通文件名字符**，`..\..\secret.png` 和 `system32\evil.png` 都被
+   resolve 成 home 内的"普通文件"——越界路径摇身一变成了内部路径。
+
+- 修复：`src/core/path-boundary.mjs` —— root 为 posix 而候选含反斜杠时
+  一律拒绝（正常 Linux 路径不会出现反斜杠；任务文本来自不受信任的远端
+  planner，宁可错杀）。Windows 行为不变。
+- 测试：新增 `test/path-boundary.test.mjs`。`resolveContainedPath` 的 flavor
+  判定平台无关，posix 用例在本地 Windows 上即可验证 Linux 语义，不必等 CI。
+- 教训：安全边界代码的测试必须在两类路径语义下都跑一遍，"本机全绿"可能
+  只是本机的路径语义恰好掩盖了漏洞。
 
 ---
 

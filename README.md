@@ -104,7 +104,7 @@ Read [`docs/RUNBOOK.md`](docs/RUNBOOK.md) before enabling routine execution.
 ## Verification
 
 ```bash
-npm test              # 396 unit tests
+npm test              # 402 unit tests
 npm run audit:privacy # secrets / private paths must not enter the repo
 npm run smoke         # CLI smoke test
 npm run check         # tests + audit + smoke
