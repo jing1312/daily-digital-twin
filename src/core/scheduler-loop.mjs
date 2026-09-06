@@ -124,7 +124,11 @@ export function createSchedulerLoop({
 
       const candidates = store.listRunnableTasks().filter((task) => (
         (task.state === 'queued' || task.state === 'retrying') && eligibleTask(task)
-      ));
+      )).filter((task) => {
+        // 中文注释：父任务是容器，不直接执行 —— 否则会被执行器如实标记 partial，
+        // 中文注释等到子任务全部到终态时 finalizeParentTask 已无法修正（父任务先进了终态）。
+        return store.listSubTasks(task.id).length === 0;
+      });
       if (candidates.length === 0) return { picked: 0, reason: 'no_runnable_tasks', policy: policy.policy };
 
       const parallelLimit = Math.min(

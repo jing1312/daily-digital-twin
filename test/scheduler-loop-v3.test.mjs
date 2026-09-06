@@ -101,6 +101,27 @@ test('本机固定流程调度器不会误领交给 Multica 的 complex 任务',
   store.close();
 });
 
+test('父任务不直接执行：调度器跳过容器任务，等子任务终态后自动收尾', async () => {
+  const store = new TaskStore(':memory:');
+  const parent = store.createTask({ request: '晨间规划出的父任务', taskType: 'unknown', priority: 5 });
+  const sub = store.createSubTask(parent.id, { request: '真正干活的 AI 子任务', taskType: 'ai_call', priority: 3 });
+  const executed = [];
+  const loop = createSchedulerLoop({
+    store,
+    config: config(),
+    telemetry: () => ({ onAcPower: true, cpuPercent: 20, availableMemoryGb: 12, diskFreeGb: 80 }),
+    executor: async ({ task }) => { executed.push(task.id); return { outcome: 'completed', summary: 'AI 结果' }; }
+  });
+
+  const result = await loop.tick();
+
+  // 中文注释：父任务不被领取执行，且在子任务完成后同一轮内被自动收尾为 completed。
+  assert.equal(result.picked, 1);
+  assert.deepEqual(executed, [sub.id]);
+  assert.equal(store.getTask(parent.id).state, 'completed');
+  store.close();
+});
+
 test('瞬时失败按 30 秒退避，下一次 tick 不会立即烧第二次尝试', async () => {
   const store = new TaskStore(':memory:');
   store.createTask({ request: '打开 Omicos' });
