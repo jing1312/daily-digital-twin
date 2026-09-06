@@ -249,6 +249,15 @@ export function validateConfig(config) {
 
   if (problems.length > 0) throw new ConfigError(problems);
 
+  // 中文注释：推理力度档位。null = 不给 API 传 reasoning_effort 参数。
+  const REASONING_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh'];
+  const checkReasoningEffort = (path, value) => {
+    if (value === undefined || value === null) return;
+    if (!REASONING_EFFORTS.includes(value)) {
+      problems.push(`${path} 只能是 ${REASONING_EFFORTS.join(' / ')} 或 null，实际为 ${JSON.stringify(value)}`);
+    }
+  };
+
   // 中文注释：校验 planner 配置。
   if (config.planner) {
     if (typeof config.planner.apiEndpoint !== 'string' && config.planner.apiEndpoint !== null) {
@@ -260,6 +269,7 @@ export function validateConfig(config) {
     if (typeof config.planner.model !== 'string' || config.planner.model.trim().length === 0) {
       problems.push('planner.model 必须是非空字符串');
     }
+    checkReasoningEffort('planner.reasoningEffort', config.planner.reasoningEffort);
   }
 
   // 中文注释：校验 executor 配置。
@@ -273,7 +283,12 @@ export function validateConfig(config) {
     if (typeof config.executor.model !== 'string' || config.executor.model.trim().length === 0) {
       problems.push('executor.model 必须是非空字符串');
     }
+    checkReasoningEffort('executor.reasoningEffort', config.executor.reasoningEffort);
   }
+
+  // 中文注释：planner/executor 的检查在早期 return 之后才追加问题，必须在这里统一抛出，
+  // 中文注释：否则这些校验形同虚设（坏配置会静默通过）。
+  if (problems.length > 0) throw new ConfigError(problems);
 
   // 中文注释：maxSlots 是对外唯一入口，同步进 resource 供资源策略使用，避免两处不一致。
   config.resource.maxSlots = config.maxSlots;
