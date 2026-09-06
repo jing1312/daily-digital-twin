@@ -40,7 +40,7 @@ if (-not (Test-Path -LiteralPath $runtimeScript -PathType Leaf)) { throw "找不
 if ($PollSeconds -lt 15) { throw '-PollSeconds 不得小于 15 秒' }
 if ($MaxBackoffSeconds -lt 15) { throw '-MaxBackoffSeconds 不得小于 15 秒' }
 
-$lockStream = Enter-DailyTwinProcessLock -HomeDirectory $resolvedHome -Name 'watchdog'
+$script:WatchdogLock = Enter-DailyTwinProcessLock -HomeDirectory $resolvedHome -Name 'watchdog'
 
 $stateDir = Join-Path $resolvedHome 'state'
 if (-not (Test-Path -LiteralPath $stateDir -PathType Container)) {
@@ -52,13 +52,13 @@ $pidFile = Join-Path $resolvedHome 'data\daemon.pid'
 $logLimitBytes = 2MB
 
 function Write-WatchdogLog {
-    param([string]$Event, [string]$Detail = '')
+    param([string]$EventName, [string]$Detail = '')
     # 中文注释：日志超过 2MB 时截断保留后半（最后 512KB），时间线仍然连续可读。
     if ((Test-Path -LiteralPath $watchdogLog) -and ((Get-Item -LiteralPath $watchdogLog).Length -gt $logLimitBytes)) {
         $tail = Get-Content -LiteralPath $watchdogLog -Tail 4096 -Encoding UTF8
         $tail | Set-Content -LiteralPath $watchdogLog -Encoding UTF8
     }
-    $line = "[{0}] {1}{2}" -f [DateTime]::UtcNow.ToString('o'), $Event, $(if ($Detail) { " | $Detail" } else { '' })
+    $line = "[{0}] {1}{2}" -f [DateTime]::UtcNow.ToString('o'), $EventName, $(if ($Detail) { " | $Detail" } else { '' })
     Add-Content -LiteralPath $watchdogLog -Value $line -Encoding UTF8
 }
 
@@ -79,32 +79,43 @@ function Test-DaemonAlive {
 
 function Start-Daemon {
     # 中文注释：detached 拉起 daemon，输出重定向到 daemon-runtime.log（同样限量截断）。
-    if ((Test-Path -LiteralPath $daemonLog) -and ((Get-Item -LiteralPath $daemonLog).Length -gt $logLimitBytes)) {
-        $tail = Get-Content -LiteralPath $daemonLog -Tail 4096 -Encoding UTF8
-        $tail | Set-Content -LiteralPath $daemonLog -Encoding UTF8
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param(
+        [string]$NodePath,
+        [string]$RepoPath,
+        [string]$RuntimeScript,
+        [string]$DaemonLog
+    )
+    if ($PSCmdlet.ShouldProcess("daemon（node：$NodePath）", '拉起')) {
+        if ((Test-Path -LiteralPath $DaemonLog) -and ((Get-Item -LiteralPath $DaemonLog).Length -gt $logLimitBytes)) {
+            $tail = Get-Content -LiteralPath $DaemonLog -Tail 4096 -Encoding UTF8
+            $tail | Set-Content -LiteralPath $DaemonLog -Encoding UTF8
+        }
+        $nodeResolved = (Get-Command $NodePath -ErrorAction Stop).Source
+        # 中文注释：仓库要求 node >= 24（node:sqlite）。版本不够时第一时间写日志，别让用户看 daemon 秒退的哑谜。
+        $nodeVersion = & $nodeResolved --version
+        $nodeMajor = 0
+        if ($nodeVersion -match '^v(\d+)') { $nodeMajor = [int]$Matches[1] }
+        if ($nodeMajor -lt 24) {
+            Write-WatchdogLog 'node-version-warning' "$nodeResolved 是 $nodeVersion，仓库要求 >= 24，daemon 大概率起不来。请用 -NodePath 指定 node 24。"
+        }
+        # 中文注释：runtime.mjs 用绝对路径，不依赖工作目录解析。
+        $process = Start-Process -FilePath $nodeResolved `
+            -ArgumentList @('"' + $RuntimeScript + '"', 'daemon') `
+            -WorkingDirectory $RepoPath `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput $DaemonLog `
+            -RedirectStandardError "$DaemonLog.err" `
+            -PassThru
+        # 中文注释：给 daemon 10 秒初始化（开库、装载执行器），之后看 PID 文件是否刷新。
+        Start-Sleep -Seconds 10
+        return $process
     }
-    $nodeResolved = (Get-Command $NodePath -ErrorAction Stop).Source
-    # 中文注释：仓库要求 node >= 24（node:sqlite）。版本不够时第一时间写日志，别让用户看 daemon 秒退的哑谜。
-    $nodeVersion = & $nodeResolved --version
-    $nodeMajor = 0
-    if ($nodeVersion -match '^v(\d+)') { $nodeMajor = [int]$Matches[1] }
-    if ($nodeMajor -lt 24) {
-        Write-WatchdogLog 'node-version-warning' "$nodeResolved 是 $nodeVersion，仓库要求 >= 24，daemon 大概率起不来。请用 -NodePath 指定 node 24。"
-    }
-    # 中文注释：runtime.mjs 用绝对路径，不依赖工作目录解析。
-    $process = Start-Process -FilePath $nodeResolved `
-        -ArgumentList @('"' + $runtimeScript + '"', 'daemon') `
-        -WorkingDirectory $RepoPath `
-        -WindowStyle Hidden `
-        -RedirectStandardOutput $daemonLog `
-        -RedirectStandardError "$daemonLog.err" `
-        -PassThru
-    # 中文注释：给 daemon 10 秒初始化（开库、装载执行器），之后看 PID 文件是否刷新。
-    Start-Sleep -Seconds 10
-    return $process
+    return $null
 }
 
-Write-WatchdogLog 'watchdog-start' "home=$resolvedHome repo=$RepoPath poll=${PollSeconds}s"
+# 中文注释：锁句柄必须存活整个进程生命周期（被 GC 释放锁就没了），顺手把锁文件路径写进启动日志证明独占成功。
+Write-WatchdogLog 'watchdog-start' "home=$resolvedHome repo=$RepoPath poll=${PollSeconds}s lock=$($script:WatchdogLock.Name)"
 
 $backoffSeconds = 15
 while ($true) {
@@ -122,7 +133,7 @@ while ($true) {
     }
 
     $process = $null
-    try { $process = Start-Daemon } catch {
+    try { $process = Start-Daemon -NodePath $NodePath -RepoPath $RepoPath -RuntimeScript $runtimeScript -DaemonLog $daemonLog } catch {
         Write-WatchdogLog 'daemon-start-error' $_.Exception.Message
     }
 
