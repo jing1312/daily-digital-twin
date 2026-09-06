@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
@@ -12,9 +12,14 @@ import {
   fetchModelList,
   normalizeEndpoint,
   modelsUrlFor,
-  normalizePatch
+  normalizePatch,
+  dashboardPayload,
+  daemonStatus,
+  stopDaemon,
+  withStore
 } from '../scripts/config-ui.mjs';
 import { loadConfig } from '../src/core/config.mjs';
+import { TaskStore } from '../src/core/task-store.mjs';
 
 // 中文注释：与 config.test.mjs 同款套路：临时目录当私有 home，用完即删。
 function withHome(work) {
@@ -131,6 +136,69 @@ test('renderPage：注入的 INITIAL 转义了 <，不会提前闭合 script 标
   const html = renderPage({ planner: { apiKey: '</script><b>x' } }, { home: 'h', configPath: 'p', exists: false });
   assert.ok(html.includes('<!doctype html>'));
   assert.ok(!html.includes('</script><b>x'));
+});
+
+withHome((home) => {
+  test('仪表盘：打开任务 / 历史 / 成本 / daemon 状态一次拉全', async (t) => {
+    // 中文注释：先在临时 home 里铺一个真实任务库：1 个排队任务 + 1 个已完成任务 + token 记账。
+    mkdirSync(join(home, 'data'), { recursive: true });
+    {
+      const store = new TaskStore(join(home, 'data', 'runtime.sqlite'), { maxSlots: 4, openTaskLimit: 8 });
+      const queued = store.createTask({ request: '排队的任务', taskType: 'ai_call', priority: 2 });
+      const done = store.createTask({ request: '已经完成的任务', taskType: 'ai_call' });
+      store.transition(done.id, 'running');
+      store.insertExecutionEvidence({ taskId: done.id, kind: 'file', target: 'data/outputs/x.txt' });
+      store.transition(done.id, 'completed', { summary: '做完了' });
+      store.recordTokenUsage({ taskId: done.id, model: 'test-model', inputTokens: 100, cachedTokens: 10, outputTokens: 20 });
+      const open = store.listOpenTasks();
+      assert.equal(open.length, 1);
+      assert.equal(open[0].state, 'queued');
+      store.close();
+    }
+
+    const payload = await dashboardPayload(home);
+    assert.equal(payload.daemon.running, false);
+    assert.equal(payload.openTasks.length, 1);
+    assert.equal(payload.openTasks[0].request, '排队的任务');
+    assert.equal(payload.history.length, 1);
+    assert.equal(payload.history[0].state, 'completed');
+    assert.equal(payload.cost.calls, 1);
+    assert.equal(payload.cost.inputTokens, 100);
+    assert.ok(payload.openTasks[0].request.length <= 81);
+
+    // 中文注释：daemonStatus / stopDaemon 的未运行路径：没 PID 文件要如实报告，不许瞎猜。
+    assert.deepEqual(await daemonStatus(home), { running: false, pid: null });
+    const stopped = await stopDaemon(home);
+    assert.equal(stopped.ok, false);
+    assert.equal(stopped.code, 'not_running');
+
+    // 中文注释：陈旧 PID 文件（进程早就不存在）也要如实报未运行。
+    const { writeFile, mkdir } = await import('node:fs/promises');
+    await mkdir(join(home, 'data'), { recursive: true });
+    await writeFile(join(home, 'data', 'daemon.pid'), '99999999\n', 'utf8');
+    assert.deepEqual(await daemonStatus(home), { running: false, pid: null });
+  });
+});
+
+withHome((home) => {
+  test('仪表盘端到端：GET /api/dashboard 在空库上返回结构化空数据', async (t) => {
+    const server = startServer({ home, port: 0 });
+    await new Promise((resolve) => server.once('listening', resolve));
+    t.after(() => server.close());
+    const base = `http://127.0.0.1:${server.address().port}`;
+
+    const res = await fetch(`${base}/api/dashboard`);
+    const data = await res.json();
+    assert.deepEqual(data.openTasks, []);
+    assert.deepEqual(data.history, []);
+    assert.equal(data.cost.calls, 0);
+    assert.equal(data.daemon.running, false);
+
+    const page = await (await fetch(base)).text();
+    assert.ok(page.includes('仪表盘'));
+    assert.ok(page.includes('未结束任务'));
+    assert.ok(page.includes('Token 用量'));
+  });
 });
 
 withHome((home) => {
