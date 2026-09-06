@@ -30,7 +30,7 @@
 **执行器**
 
 - `ai_call` —— 走 OpenAI 兼容接口，token 账本按任务记录（输入、缓存输入、输出、延迟、本地估价）。任务描述里引用了 `DAILY_TWIN_HOME` 内的图片文件时，执行器自动路由到视觉模型（`executor.visionModel`）并把图片作为多模态输入带上。
-- `desktop` / `browser` —— 从 `DAILY_TWIN_HOME` 里的私有执行器模块装载（例如 `executor/index.mjs`）。自带的私有执行器能打开已登记的应用、网站和网址，并上报进程与窗口证据；没有私有执行器时，这些类型如实返回 `partial`。
+- `desktop` / `browser` —— 从 `DAILY_TWIN_HOME` 里的私有执行器模块装载（例如 `executor/index.mjs`）。自带的私有执行器能打开已登记的应用（进程 + 窗口证据），并用 `playwright-core` 驱动受管 Edge 浏览器打开已登记网站或网址——回读真实 URL 与页面标题，截图落盘作为文件证据。没有私有执行器时，这些类型如实返回 `partial`。
 - `unknown` —— 原样跳过，不瞎猜。
 
 **飞书控制面**（`serve`）—— WebSocket 网关，首次发消息的人绑定为唯一所有者，之后其他人一律拒绝；支持任务派发与控制命令（`status`、`pause`、`resume`、`cancel`、查证据），回执统一脱敏。
@@ -119,7 +119,7 @@ Windows 额外跑 `npm run lint:ps` 和 `npm run selftest:ps`（PowerShell 解�
 
 ## 路线图
 
-- 真浏览器执行器：私有执行器接口后面挂 Playwright 受管会话。
+- 已登记的多步浏览器流：在私有目录里定义填写/提交步骤，在证据门控之下执行。
 - 常驻 daemon 崩溃自愈（Windows 计划任务）。
 - 按能力选模型：分类用便宜模型，规划用强模型。
 - 飞书控制面收尾（应用密钥、worker 绑定），实现手机优先的使用方式。
