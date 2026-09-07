@@ -1,3 +1,7 @@
+<div align="center">
+  <img src="docs/assets/cover.svg" alt="Daily Digital Twin: repetitive chores go to the machine, every step leaves evidence — nothing reports completed without proof" width="100%" />
+</div>
+
 # Daily Digital Twin
 
 **English** | [简体中文](README.zh-CN.md)
@@ -104,7 +108,7 @@ Read [`docs/RUNBOOK.md`](docs/RUNBOOK.md) before enabling routine execution.
 ## Verification
 
 ```bash
-npm test              # 399 unit tests
+npm test              # 400 unit tests
 npm run audit:privacy # secrets / private paths must not enter the repo
 npm run smoke         # CLI smoke test
 npm run check         # tests + audit + smoke
