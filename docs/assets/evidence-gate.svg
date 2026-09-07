@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 360" width="1200" height="360" role="img" aria-labelledby="egT egD" font-family="Segoe UI, PingFang SC, Microsoft YaHei, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 300" width="1200" height="300" role="img" aria-labelledby="egT egD" font-family="Segoe UI, PingFang SC, Microsoft YaHei, sans-serif">
   <title id="egT">Daily Digital Twin — evidence gate</title>
-  <desc id="egD">A running task must present process, window, page, or file evidence; verified evidence completes it, missing evidence leaves it partial, exhausted retries fail it.</desc>
+  <desc id="egD">A task must present process, window, page, or file evidence; verified evidence completes it, missing evidence leaves it partial, exhausted retries fail it. Shown as an evidence checklist card for one real task.</desc>
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0%" stop-color="#12294f"/>
@@ -11,88 +11,69 @@
       <stop offset="0%" stop-color="#38bdf8"/>
       <stop offset="100%" stop-color="#a78bfa"/>
     </linearGradient>
-    <linearGradient id="gateEdge" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.9"/>
-      <stop offset="100%" stop-color="#a78bfa" stop-opacity="0.9"/>
+    <linearGradient id="headline" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#7fb9ff"/>
+      <stop offset="100%" stop-color="#c9e2ff"/>
     </linearGradient>
     <filter id="card-shadow" x="-30%" y="-30%" width="160%" height="160%">
-      <feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#0a1830" flood-opacity="0.3"/>
+      <feDropShadow dx="0" dy="10" stdDeviation="18" flood-color="#0a1830" flood-opacity="0.35"/>
     </filter>
-    <marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
-      <path d="M2 1L8 5L2 9" fill="none" stroke="#9db8e0" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-    </marker>
   </defs>
 
-  <rect width="1200" height="360" fill="url(#bg)"/>
-  <circle cx="1100" cy="40" r="180" fill="#38bdf8" opacity="0.07"/>
-  <circle cx="1150" cy="350" r="150" fill="#a78bfa" opacity="0.06"/>
-  <circle cx="50" cy="360" r="130" fill="#38bdf8" opacity="0.05"/>
+  <rect width="1200" height="300" fill="url(#bg)"/>
+  <circle cx="1050" cy="50" r="190" fill="#38bdf8" opacity="0.07"/>
+  <circle cx="1130" cy="290" r="160" fill="#a78bfa" opacity="0.06"/>
+  <circle cx="60" cy="300" r="140" fill="#38bdf8" opacity="0.05"/>
 
-  <g stroke="#38bdf8" stroke-opacity="0.5" stroke-width="1.2" fill="none">
-    <path d="M36 60V36h24"/>
-    <path d="M1140 36h24v24"/>
-    <path d="M36 300v24h24"/>
-    <path d="M1140 324h24v-24"/>
+  <!-- 左侧文案 -->
+  <rect x="80" y="46" width="196" height="34" rx="17" fill="none" stroke="#38bdf8" stroke-opacity="0.55"/>
+  <text x="178" y="69" font-size="14" font-weight="600" fill="#7fb9ff" text-anchor="middle" letter-spacing="2">EVIDENCE GATE</text>
+  <text x="80" y="136" font-size="54" font-weight="700" fill="#ffffff">先拿证据</text>
+  <text x="80" y="204" font-size="54" font-weight="700" fill="url(#headline)">再谈完成</text>
+  <text x="82" y="246" font-size="18" fill="#cfe0ff">进程 · 窗口 · 页面 · 文件，四类实证缺一不可 —— 缺了就如实 partial</text>
+
+  <!-- 底部小流程带 -->
+  <g font-size="12.5" fill="#dbe8ff">
+    <circle cx="84" cy="278" r="4" fill="#9db8e0"/>
+    <text x="94" y="282">queued</text>
+    <text x="152" y="282" fill="#8aa6d4">→</text>
+    <circle cx="184" cy="278" r="4" fill="#38bdf8"/>
+    <text x="194" y="282">running</text>
+    <text x="256" y="282" fill="#8aa6d4">→</text>
+    <polygon points="288,272 296,278 288,284 280,278" fill="url(#accent)"/>
+    <text x="304" y="282">证据核验</text>
+    <text x="362" y="282" fill="#8aa6d4">→</text>
+    <circle cx="394" cy="278" r="4" fill="#22c55e"/>
+    <text x="404" y="282">completed</text>
+    <circle cx="492" cy="278" r="4" fill="#fbbf24"/>
+    <text x="502" y="282">partial</text>
+    <circle cx="556" cy="278" r="4" fill="#f87171"/>
+    <text x="566" y="282">failed</text>
   </g>
 
-  <!-- 标题区 -->
-  <rect x="80" y="42" width="196" height="32" rx="16" fill="none" stroke="#38bdf8" stroke-opacity="0.55"/>
-  <text x="178" y="63" font-size="13.5" font-weight="600" fill="#7fb9ff" text-anchor="middle" letter-spacing="2">EVIDENCE GATE</text>
-  <text x="80" y="114" font-size="30" font-weight="700" fill="#ffffff">没有证据，不说完成</text>
-
-  <!-- 主流程 -->
-  <g filter="url(#card-shadow)">
-    <rect x="80" y="195" width="132" height="60" rx="12" fill="#ffffff" fill-opacity="0.07" stroke="#7fb9ff" stroke-opacity="0.28"/>
-    <rect x="250" y="195" width="132" height="60" rx="12" fill="#ffffff" fill-opacity="0.07" stroke="#7fb9ff" stroke-opacity="0.28"/>
+  <!-- 右侧证据核验单卡片 -->
+  <g transform="rotate(-4 940 150)" filter="url(#card-shadow)">
+    <rect x="760" y="42" width="360" height="216" rx="18" fill="#ffffff"/>
+    <rect x="760" y="42" width="360" height="48" rx="18" fill="#f4f7fc"/>
+    <rect x="760" y="66" width="360" height="24" fill="#f4f7fc"/>
+    <circle cx="786" cy="66" r="6" fill="#ff5f57"/>
+    <circle cx="808" cy="66" r="6" fill="#febc2e"/>
+    <circle cx="830" cy="66" r="6" fill="#28c840"/>
+    <text x="940" y="72" font-size="15" font-weight="600" fill="#1e2a44" text-anchor="middle">任务 #47 · 早报收集</text>
+    <g font-size="13" fill="#333b4d">
+      <circle cx="800" cy="112" r="10" fill="#16a34a"/>
+      <path d="M 795 112 L 799 116 L 805 108" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="820" y="116">进程证据　edge.exe · pid 85656</text>
+      <circle cx="800" cy="148" r="10" fill="#16a34a"/>
+      <path d="M 795 148 L 799 152 L 805 144" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="820" y="152">文件证据　outputs/morning.md · 2.3 KB</text>
+      <circle cx="800" cy="184" r="10" fill="#16a34a"/>
+      <path d="M 795 184 L 799 188 L 805 180" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="820" y="188">页面证据　bing.com · 标题核验通过</text>
+    </g>
+    <rect x="780" y="206" width="320" height="34" rx="9" fill="#e7f9f0"/>
+    <circle cx="800" cy="223" r="9" fill="#16a34a"/>
+    <path d="M 795.5 223 L 799 226.5 L 805 219.5" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="816" y="228" font-size="13.5" font-weight="600" fill="#0f7a43">判定 completed —— 证据齐全，如实闭环</text>
   </g>
-  <rect x="80" y="195" width="3" height="60" rx="1.5" fill="#9db8e0"/>
-  <rect x="250" y="195" width="3" height="60" rx="1.5" fill="#38bdf8"/>
-  <text x="146" y="222" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">queued</text>
-  <text x="146" y="241" text-anchor="middle" font-size="11" fill="#9db8e0">等待调度</text>
-  <text x="316" y="222" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">running</text>
-  <text x="316" y="241" text-anchor="middle" font-size="11" fill="#9db8e0">执行器干活</text>
-
-  <path d="M212 225 L244 225" fill="none" stroke="#9db8e0" stroke-opacity="0.8" stroke-width="1.5" marker-end="url(#ah)"/>
-  <path d="M386 225 L446 225" fill="none" stroke="#9db8e0" stroke-opacity="0.8" stroke-width="1.5" marker-end="url(#ah)"/>
-
-  <!-- 证据门控（菱形闸门） -->
-  <polygon points="560,161 670,225 560,289 450,225" fill="#ffffff" fill-opacity="0.08" stroke="url(#gateEdge)" stroke-width="1.6" filter="url(#card-shadow)"/>
-  <text x="560" y="214" text-anchor="middle" font-size="15" font-weight="700" fill="#ffffff">any evidence?</text>
-  <text x="560" y="236" text-anchor="middle" font-size="10.5" fill="#cfe0ff">process · window</text>
-  <text x="560" y="252" text-anchor="middle" font-size="10.5" fill="#cfe0ff">page · file</text>
-
-  <!-- 门控出口连线 -->
-  <path d="M670 210 C 706 182, 726 168, 792 164" fill="none" stroke="#9db8e0" stroke-opacity="0.8" stroke-width="1.4" marker-end="url(#ah)"/>
-  <text x="728" y="158" text-anchor="middle" font-size="11" fill="#5eead4">verified</text>
-  <path d="M670 225 L792 229" fill="none" stroke="#9db8e0" stroke-opacity="0.8" stroke-width="1.4" marker-end="url(#ah)"/>
-  <text x="730" y="219" text-anchor="middle" font-size="11" fill="#fbbf24">none</text>
-  <path d="M316 255 C 316 322, 560 332, 700 322 C 756 318, 780 306, 794 296" fill="none" stroke="#9db8e0" stroke-opacity="0.8" stroke-width="1.4" marker-end="url(#ah)"/>
-  <text x="530" y="330" text-anchor="middle" font-size="11" fill="#f87171">retries exhausted</text>
-
-  <!-- 三种结局 -->
-  <g filter="url(#card-shadow)">
-    <rect x="800" y="137" width="320" height="56" rx="12" fill="#ffffff" fill-opacity="0.07" stroke="#7fb9ff" stroke-opacity="0.28"/>
-    <rect x="800" y="203" width="320" height="56" rx="12" fill="#ffffff" fill-opacity="0.07" stroke="#7fb9ff" stroke-opacity="0.28"/>
-    <rect x="800" y="269" width="320" height="56" rx="12" fill="#ffffff" fill-opacity="0.07" stroke="#7fb9ff" stroke-opacity="0.28"/>
-  </g>
-  <rect x="800" y="137" width="3" height="56" rx="1.5" fill="#5eead4"/>
-  <circle cx="838" cy="165" r="9" fill="none" stroke="#5eead4" stroke-width="1.4"/>
-  <path d="M834.5 165 L837 167.8 L842 162.4" fill="none" stroke="#5eead4" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
-  <text x="860" y="161" font-size="15" font-weight="600" fill="#ffffff">completed</text>
-  <text x="860" y="180" font-size="11.5" fill="#cfe0ff">证据核验通过，如实闭环</text>
-
-  <rect x="800" y="203" width="3" height="56" rx="1.5" fill="#fbbf24"/>
-  <circle cx="838" cy="231" r="9" fill="none" stroke="#fbbf24" stroke-width="1.4"/>
-  <path d="M833 231 L843 231" stroke="#fbbf24" stroke-width="1.4" stroke-linecap="round"/>
-  <text x="860" y="227" font-size="15" font-weight="600" fill="#ffffff">partial</text>
-  <text x="860" y="246" font-size="11.5" fill="#cfe0ff">干了活，没证据 —— 诚实上报</text>
-
-  <rect x="800" y="269" width="3" height="56" rx="1.5" fill="#f87171"/>
-  <circle cx="838" cy="297" r="9" fill="none" stroke="#f87171" stroke-width="1.4"/>
-  <path d="M834.5 293.5 L841.5 300.5 M841.5 293.5 L834.5 300.5" stroke="#f87171" stroke-width="1.4" stroke-linecap="round"/>
-  <text x="860" y="293" font-size="15" font-weight="600" fill="#ffffff">failed</text>
-  <text x="860" y="312" font-size="11.5" fill="#cfe0ff">重试耗尽，失败关闭，不静默重开</text>
-
-  <!-- 底部结语 -->
-  <text x="600" y="346" text-anchor="middle" font-size="12" fill="#b9cce8">partial 是诚实的回答：活干了，证据没到手 —— 没有证据，任务永远不会被叫作 completed</text>
 </svg>
