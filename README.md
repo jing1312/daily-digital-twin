@@ -75,7 +75,9 @@ Missing or outdated telemetry is not an edge case — it disables scheduling ent
 
 ## Task lifecycle
 
-![Evidence gate](docs/assets/evidence-gate.svg)
+<div align="center">
+  <img src="docs/assets/evidence-gate.svg" alt="Evidence gate: a task needs process, window, page, or file proof — verified evidence completes it, missing evidence leaves it partial, exhausted retries fail it" width="100%" />
+</div>
 
 ## Quick start
 
