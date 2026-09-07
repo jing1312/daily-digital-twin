@@ -75,7 +75,9 @@
 
 ## 任务生命周期
 
-![证据门控](docs/assets/evidence-gate.svg)
+<div align="center">
+  <img src="docs/assets/evidence-gate.svg" alt="证据门控：任务必须拿出进程、窗口、页面或文件证据——核验通过才算完成，缺证据如实 partial，重试耗尽判 failed" width="100%" />
+</div>
 
 ## 快速上手
 
