@@ -1,3 +1,7 @@
+<div align="center">
+  <img src="docs/assets/cover.svg" alt="Daily Digital Twin：重复的事交给机器，每一步都留证据 —— 无证据不说 completed" width="100%" />
+</div>
+
 # Daily Digital Twin
 
 [English](README.md) | **简体中文**
@@ -104,7 +108,7 @@ npm run runtime -- show 1
 ## 验证
 
 ```bash
-npm test              # 399 个单元测试
+npm test              # 400 个单元测试
 npm run audit:privacy # 密钥 / 私有路径不得进仓库
 npm run smoke         # CLI 冒烟
 npm run check         # 测试 + 审计 + 冒烟
